@@ -1,0 +1,13 @@
+[project]
+name = "quad-nav-rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gymnasium",
+    "numpy",
+    "mujoco",
+    "matplotlib",
+    "pip",
+]
