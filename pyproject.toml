@@ -10,4 +10,20 @@ dependencies = [
     "mujoco",
     "matplotlib",
     "pip",
+    "torch>=2.7.0",
+  "torchvision>=0.22.0",
+  "wandb",
+  "tyro",
+  "stable-baselines3"
+]
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu" },
+]
+torchvision = [
+    { index = "pytorch-cpu" },
 ]

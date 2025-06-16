@@ -9,3 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .cursorrules
+*.log
+/wandb
+/runs
+/sb3-runs
+/videos
