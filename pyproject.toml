@@ -11,10 +11,17 @@ dependencies = [
     "matplotlib",
     "pip",
     "torch>=2.7.0",
-  "torchvision>=0.22.0",
-  "wandb",
-  "tyro",
-  "stable-baselines3"
+    "torchvision>=0.22.0",
+    "wandb",
+    "tyro",
+    "stable-baselines3",
+    "tensorboard",
+    "seaborn",
+    "pandas",
+    "opencv-python",
+    "pygame",
+    "python-dotenv",
+    "pydantic"
 ]
 [[tool.uv.index]]
 name = "pytorch-cpu"
