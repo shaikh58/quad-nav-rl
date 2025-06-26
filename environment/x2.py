@@ -62,12 +62,17 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self._max_yaw_rate = 1.0
 
         # user defined parameters
+        self.env_center = self.model.stat.center.copy()
+        # radius of environment
+        self.env_extent = self.model.stat.extent.copy()
         self._target_location = target_location
+        # NOTE: the initial state is set to a default value env.init_qpos
         self._ctrl_cost_weight = ctrl_cost_weight
         self._reset_noise_scale = reset_noise_scale
 
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
+        self.hover_thrust = self.model.keyframe('hover').ctrl.copy()
 
         # qpos is (7,) (x, y, z, qw, qx, qy, qz)
         # qvel is (6,) (vx, vy, vz, wx, wy, wz)
@@ -79,31 +84,36 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
         )
 
+
     def control_cost(self, action):
         control_cost = self._ctrl_cost_weight * np.sum(np.square(action))
         return control_cost
         
+
     def _get_obs(self):
         position = self.data.qpos.flatten()
         velocity = self.data.qvel.flatten()
         observation = np.concatenate((position, velocity))
         return observation
 
+
     def _compute_reward(self, action):
         # TODO: implement reward function with intermediate rewards
         return 0
 
+
     def reset_model(self):
         """Resets the state of the environment and returns an initial observation."""
-        noise_low = -self._reset_noise_scale
-        noise_high = self._reset_noise_scale
+        # noise_low = -self._reset_noise_scale
+        # noise_high = self._reset_noise_scale
         # self.init_qpos comes from parent class 
-        qpos = self.init_qpos + self.np_random.uniform(
-            low=noise_low, high=noise_high, size=self.model.nq
-        )
-        qvel = self.init_qvel + self.np_random.uniform(
-            low=noise_low, high=noise_high, size=self.model.nv
-        )
+        qpos = self.init_qpos #+ self.np_random.uniform(
+            # low=noise_low, high=noise_high, size=self.model.nq
+        # )
+        qvel = self.init_qvel # initialize at hover
+        # set action to hover thrust
+        self.data.ctrl = self.hover_thrust
+
         # parent method from MujocoEnv; copies qpos, qvel to data.qpos, 
         # data.qvel to avoid pointer issues in underlying c++
         self.set_state(qpos, qvel) 
