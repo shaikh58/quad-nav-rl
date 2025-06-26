@@ -14,3 +14,5 @@ wheels/
 /runs
 /sb3-runs
 /videos
+.DS_Store
+*.ipynb

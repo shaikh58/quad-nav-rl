@@ -56,6 +56,9 @@ class Args:
     max_grad_norm: float = 0.5
     """scale factor for clipping gradients"""
     clip_grad: bool = False
+    """if toggled, gradients will be clipped"""
+    shared_network: bool = False
+    """if toggled, the actor and critic share the same network"""
 
 
 def env_maker(env_id, seed, idx, capture_video, run_name):
@@ -83,11 +86,13 @@ def kl_divergence(net, prev_net, obs):
         return kl_div.item(), var.item()
 
 
-def compute_entropy():
-    # TODO: implement this
-    return
+def print_grad_graph(tensor, name=""):
+    print(f"\nGradient graph for {name}:")
+    print("Grad function: ", tensor.grad_fn)
+    print("Next functions: ", tensor.grad_fn.next_functions)
 
-class Network(nn.Module):
+
+class NetworkShared(nn.Module):
     def __init__(self, hidden_sizes, action_space, activation):
         """Initialize the network with shared layers and separate actor/critic heads.
 
@@ -99,11 +104,11 @@ class Network(nn.Module):
         """
         super().__init__()
         layers = []
-        for i in range(len(sizes) - 1):
-            layers += [nn.Linear(sizes[i], sizes[i+1]), activation()]
+        for i in range(len(hidden_sizes) - 1):
+            layers += [nn.Linear(hidden_sizes[i], hidden_sizes[i+1]), activation()]
         self.shared = nn.Sequential(*layers)
-        self.actor_head = nn.Linear(sizes[-1], action_space)
-        self.critic_head = nn.Linear(sizes[-1], 1)
+        self.actor_head = nn.Linear(hidden_sizes[-1], action_space)
+        self.critic_head = nn.Linear(hidden_sizes[-1], 1)
     
     def forward(self, state):
         shared_features = self.shared(state)
@@ -112,9 +117,26 @@ class Network(nn.Module):
         return actor_output, critic_output
 
 
+class Network(nn.Module):
+    """General network that can be used for both actor and critic."""
+    def __init__(self, hidden_sizes, output_space, activation):
+        super().__init__()
+        layers = []
+        for i in range(len(hidden_sizes) - 1):
+            layers += [nn.Linear(hidden_sizes[i], hidden_sizes[i+1]), activation()]
+        self.layers = nn.Sequential(*layers)
+        self.output_head = nn.Linear(hidden_sizes[-1], output_space)
+
+    def forward(self, state):
+        features = self.layers(state)
+        output = self.output_head(features)
+        return output
+
+
 def compute_actor_loss(actions, logits, advantages):
     """Computes loss for policy gradient based on action taken in state, over the entire batch."""
     log_probs = Categorical(logits=logits).log_prob(actions) # action is index of the action to be taken
+    assert log_probs.shape == advantages.shape, "In actor loss, log_probs and advantages must have the same shape"
     # recall policy fcn J = E[d\dw(log policy) * advantage]
     return -(log_probs * advantages).mean() # computed over the batch so use mean for expectation
 
@@ -131,7 +153,8 @@ def compute_critic_loss(batch_rewards, batch_values, batch_ep_dones):
         else:
             R = batch_rewards[i] + args.gamma * R
         returns.append(R)
-    returns = torch.as_tensor(returns).to(device)
+    returns = torch.as_tensor(returns)
+    assert returns.shape == batch_values.shape, "In critic loss, returns and batch_values must have the same shape"
     return F.mse_loss(returns, batch_values)
 
 
@@ -143,9 +166,9 @@ def compute_advantages(ep_rewards, ep_values):
             # R = ep_values[i] # to use value function estimate for terminal state
             R = ep_rewards[i] # to use actual return
         else:
-            R = ep_rewards[i] + args.gamma * R + ep_values[i+1]
-        # to use TD error, use R + ep_values[i+1] - ep_values[i]
-        advs.append(R - ep_values[i]) # don't detach values since actor/critic share the same network
+            # R = ep_rewards[i] + args.gamma * ep_values[i+1] - ep_values[i] # 1-step TD error
+            R = ep_rewards[i] + args.gamma * R # official algorithm - sum of discounted rewards-to-go
+        advs.append(R - ep_values[i]) # detach value estimates if actor/critic don't share the same network
     return advs
 
 
@@ -194,8 +217,14 @@ if __name__ == "__main__":
 
     # setup the actor, critic
     # NOTE: in the official algorithm the actor and critic share params
-    policy = Network(sizes, action_space, activation=nn.Tanh).to(device)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=args.learning_rate)
+    if args.shared_network:
+        policy = NetworkShared(sizes, action_space, activation=nn.Tanh).to(device)
+        optimizer = torch.optim.Adam(policy.parameters(), lr=args.learning_rate)
+    else:
+        policy = Network(sizes, action_space, activation=nn.Tanh).to(device)
+        critic = Network(sizes, 1, activation=nn.ReLU).to(device)
+        actor_optimizer = torch.optim.Adam(policy.parameters(), lr=args.learning_rate)
+        critic_optimizer = torch.optim.Adam(critic.parameters(), lr=args.learning_rate)
 
     # start the simulation
     start_time = time.time()
@@ -211,6 +240,7 @@ if __name__ == "__main__":
         batch_actions = [] # (B,)
         batch_action_logits = [] # (B,2)
         batch_advantages = [] # (B,)
+        batch_entropy = [] # (B,)
         batch_values = []
         batch_ep_dones = []
         ep_rewards = [] # (T,)
@@ -219,33 +249,50 @@ if __name__ == "__main__":
             if global_step % 1000 == 0:
                 print(f"Epoch {epoch + 1}, Global Step: {global_step}")
             # note: critic evaluated at s_t (obs), NOT next_obs (s_t+1)
-            actions_logits, v = policy(torch.Tensor(obs).to(device))
+            if args.shared_network:
+                actions_logits, v = policy(torch.Tensor(obs).to(device))
+            else:
+                actions_logits = policy(torch.Tensor(obs).to(device))
+                v = critic(torch.Tensor(obs).to(device))
+            # if global_step % 1000 == 0: print_grad_graph(v, "v")
             # sample an action; forward pass
             actions_dist = Categorical(logits=actions_logits)
             # stochastic action selection
             action = actions_dist.sample() # keep action on device until appended to batch_actions to track gradient properly
+            entropy = actions_dist.entropy().mean().item()
             # take a simulation step; currently only supports a single thread
             next_obs, rewards, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            # early termination penalty
+            if terminations.item() or truncations.item():
+                if infos['episode']['l'].item() < 20:
+                    early_termination_reward_offset = infos['episode']['l'].item()
+                    rewards = rewards.item() - early_termination_reward_offset * 0.5
+                else: rewards = rewards.item()
+            else: rewards = rewards.item()
             global_step += 1
 
             # update episode and batch info
-            ep_rewards.append(rewards.item())
+            ep_rewards.append(rewards)
             ep_values.append(v)
             batch_states.append(obs.copy())
             batch_actions.append(action)
             batch_action_logits.append(actions_logits)
             batch_values.append(v)
-            batch_rewards.append(rewards.item())
+            batch_rewards.append(rewards)
+            batch_entropy.append(entropy)
 
             # important step, easy to forget - increment the current obs
             obs = next_obs
 
             # at episode end, compute advantages starting from terminal state, and reset the env
             if terminations.item() or truncations.item():
-                writer.add_scalar("charts/episodic_return", infos["episode"]["r"], global_step)
-                writer.add_scalar("charts/episodic_length", infos["episode"]["l"], global_step)
-
-                ep_advantages = compute_advantages(ep_rewards, ep_values)
+                writer.add_scalar("metrics/episodic_return", infos["episode"]["r"], global_step)
+                writer.add_scalar("metrics/episodic_length", infos["episode"]["l"], global_step)
+                if args.shared_network:
+                    ep_advantages = compute_advantages(ep_rewards, ep_values)
+                else:
+                    # if separate critic, detach for adv to avoid gradient flowing into critic twice
+                    ep_advantages = compute_advantages(ep_rewards, [v.detach() for v in ep_values])
                 batch_advantages.extend(ep_advantages)
                 batch_ep_dones.append(1)
                 obs, _ = envs.reset()
@@ -255,35 +302,66 @@ if __name__ == "__main__":
             else:
                 batch_ep_dones.append(0)
 
-        # update actor, critic
+        # prepare batch data
         actions = torch.as_tensor(batch_actions).to(device)
-        logits = torch.stack(batch_action_logits).squeeze()
+        logits = torch.stack(batch_action_logits).squeeze().to(device)
         advantages = torch.as_tensor(batch_advantages).to(device)
         # normalize advantages over the entire batch - can also normalize by episode
         # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         b_rewards = torch.as_tensor(batch_rewards).to(device)
-        values = torch.as_tensor(batch_values).to(device)
+        states = torch.as_tensor(batch_states)
+        # print_grad_graph(batch_values[0], "batch_values")
+        values = torch.stack(batch_values).squeeze().to(device) # use stack to maintain gradients
         dones = np.array(batch_ep_dones)
-            
+        entropy = torch.as_tensor(batch_entropy).mean().item()
+
+        # logging: find highest and lowest value states
+        max_idx = torch.argmax(values)
+        min_idx = torch.argmin(values)
+        state_max_val = states[max_idx].squeeze()
+        state_min_val = states[min_idx].squeeze()
+        if args.track:
+            wandb.log({
+                "analysis/max_value_state": {"cart_position": state_max_val[0].item(),"cart_velocity": state_max_val[1].item(),
+                "pole_angle": state_max_val[2].item(), "pole_velocity": state_max_val[3].item()
+                },
+                "analysis/min_value_state": {"cart_position": state_min_val[0].item(),"cart_velocity": state_min_val[1].item(),
+                    "pole_angle": state_min_val[2].item(),"pole_velocity": state_min_val[3].item()
+                }}, step=global_step)
+
+        # update actor, critic
         actor_loss = compute_actor_loss(actions, logits, advantages)
         critic_loss = compute_critic_loss(b_rewards, values, dones)
-        loss = args.actor_loss_w * actor_loss + args.critic_loss_w * critic_loss
-        optimizer.zero_grad() # alter this to implement gradient accumulation
-        loss.backward()
+        if args.shared_network:
+            loss = args.actor_loss_w * actor_loss + args.critic_loss_w * critic_loss
+            optimizer.zero_grad()
+            loss.backward()
+            # clip gradients to prevent large updates
+            if args.clip_grad:
+                nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+            optimizer.step()
+            writer.add_scalar("losses/total_loss", loss, global_step)
+        else:
+            actor_optimizer.zero_grad()
+            critic_optimizer.zero_grad()
+            actor_loss.backward()
+            critic_loss.backward()
+            # clip gradients to prevent large updates
+            if args.clip_grad:
+                nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+            actor_optimizer.step()
+            critic_optimizer.step()
 
         writer.add_scalar("losses/actor_loss", actor_loss, global_step)
         writer.add_scalar("losses/critic_loss", critic_loss, global_step)
-        writer.add_scalar("losses/total_loss", loss, global_step)
+        if args.shared_network:
+            writer.add_scalar("losses/total_loss", loss, global_step)
+        writer.add_scalar("losses/entropy", entropy, global_step)
 
         # track gradients
         for name, param in policy.named_parameters():
             if param.grad is not None:
                 writer.add_scalar(f'gradients/{name}/norm', param.grad.norm(), epoch)
                 writer.add_histogram(f'gradients/{name}/histogram', param.grad, epoch)
-
-        # clip gradients to prevent large updates
-        if args.clip_grad:
-            nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
-        optimizer.step()
 
     print(f"Total training time: {time.time() - start_time}")
