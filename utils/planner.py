@@ -32,8 +32,6 @@ class BasePlanner(ABC):
     @abstractmethod
     def plan_trajectory(
         self, 
-        current_state: np.ndarray, 
-        goal_state: np.ndarray,
         **kwargs
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Plan a trajectory from current state to goal state."""
@@ -49,13 +47,13 @@ class BasePlanner(ABC):
         obstacle_info = {}
         
         # Access Mujoco model data for obstacle information
-        if hasattr(self.env, 'model') and hasattr(self.env.model, 'geom_name2id'):
-            for geom_name, geom_id in self.env.model.geom_name2id.items():
+        if hasattr(self.env, 'model') and hasattr(self.env.unwrapped.model, 'geom_name2id'):
+            for geom_name, geom_id in self.env.unwrapped.model.geom_name2id.items():
                 if 'obstacle' in geom_name.lower() or 'wall' in geom_name.lower():
                     # Get obstacle position and size
-                    pos = self.env.model.geom_pos[geom_id]
-                    size = self.env.model.geom_size[geom_id]
-                    geom_type = self.env.model.geom_type[geom_id]
+                    pos = self.env.unwrapped.model.geom_pos[geom_id]
+                    size = self.env.unwrapped.model.geom_size[geom_id]
+                    geom_type = self.env.unwrapped.model.geom_type[geom_id]
                     
                     obstacle_info[geom_name] = {
                         'position': pos,
@@ -89,8 +87,8 @@ class StraightLinePlanner(BasePlanner):
             info: Planning information
         """
         # Extract positions
-        current_pos = self.env.data.qpos[:3]
-        goal_pos = self.env._target_location
+        current_pos = self.env.unwrapped.data.qpos[:3]
+        goal_pos = self.env.unwrapped._target_location
         
         # Calculate distance and direction
         displacement = goal_pos - current_pos
@@ -102,14 +100,15 @@ class StraightLinePlanner(BasePlanner):
         
         # Only plan position trajectory so as not to overconstrain the controller
         trajectory = np.zeros((n_points, 3)) 
-        
+
         # Generate position trajectory (linear interpolation)
         for i in range(n_points):
             # Position: linear interpolation
-            trajectory[i, :3] = current_pos + self.step_size * direction
+            trajectory[i] = current_pos + self.step_size * direction
+            current_pos = trajectory[i]
         
         info = {
-            'distance': distance,
+            'dist_start_to_goal': distance,
             'n_points': n_points,
         }
         

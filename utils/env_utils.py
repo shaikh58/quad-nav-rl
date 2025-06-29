@@ -2,7 +2,7 @@ import numpy as np
 from typing import List, Dict, Tuple
 
 
-class RandomEnvGenerator:
+class EnvironmentRandomizer:
     """
     Random environment generator for MuJoCo-based gym environments.
     
@@ -12,28 +12,29 @@ class RandomEnvGenerator:
     """
     
     def __init__(self, env, **kwargs):
-        """
-        Initialize the environment randomizer.
-        
-        Args:
-            env: Gym environment object with MuJoCo model
-            **kwargs: Additional configuration parameters
-        """
         self.env = env
         self.kwargs = kwargs
         self.obstacles = []
+        self.env_radius_lb = 3
+        self.env_radius_ub = 15
+        self.start_orientation = np.array([1, 0, 0, 0])
+        self.start_vel = np.array([0, 0, 0, 0, 0, 0])
+
+    def set_env_bounds(self):
+        self.env.unwrapped.model.stat.extent = self.env.unwrapped.np_random.uniform(self.env_radius_lb, self.env_radius_ub)
         
     def sample_sphere(self):
         # sample x,y inside a spherical region; center, extent from the model file
-        azimuth = self.env.np_random.uniform(0, 2*np.pi) 
-        elevation = self.env.np_random.uniform(0, np.pi/2)
+        azimuth = self.env.unwrapped.np_random.uniform(0, 2*np.pi) 
+        elevation = self.env.unwrapped.np_random.uniform(0, np.pi/2)
         # extent is radius of the sphere
-        x = self.env.env_extent * np.cos(azimuth) * np.sin(elevation)
-        y = self.env.env_extent * np.sin(azimuth) * np.sin(elevation)
-        z = self.env.env_center[2] + self.env.env_extent * np.sin(elevation)
-
+        x = self.env.unwrapped.model.stat.extent * np.cos(azimuth) * np.sin(elevation)
+        y = self.env.unwrapped.model.stat.extent * np.sin(azimuth) * np.sin(elevation)
+        # constrain z so that the euclidean dist to center is less than extent
+        x_c, y_c, z_c = self.env.unwrapped.model.stat.center
+        z_max = np.sqrt(self.env.unwrapped.model.stat.extent**2 - (x-x_c)**2 - (y-y_c)**2) + z_c
+        z = self.env.unwrapped.np_random.uniform(z_c, z_max)
         return np.array([x, y, z])
-        
         
     def set_initial_state(self):
         """
@@ -41,12 +42,11 @@ class RandomEnvGenerator:
         """
         self.start_pos = self.sample_sphere()
         # init_qpos is the state that the env initializes to when reset() is called
-        self.env.init_qpos[:3] = self.start_pos
+        self.env.unwrapped.init_qpos[:3] = self.start_pos
         # start upright
-        self.env.init_qpos[3:7] = np.array([1, 0, 0, 0])
+        self.env.unwrapped.init_qpos[3:7] = self.start_orientation
         # start stationary
-        self.env.init_qvel[:] = np.array([0, 0, 0, 0, 0, 0])
-    
+        self.env.unwrapped.init_qvel[:] = self.start_vel
 
     def set_goal_state(self, min_distance: float = 1.0):
         """
@@ -59,9 +59,8 @@ class RandomEnvGenerator:
             if np.linalg.norm(target_pos - self.start_pos) >= min_distance:
                 break
 
-        self.env._target_location = target_pos
+        self.env.unwrapped._target_location = target_pos
                 
-        
     def add_obstacles(self, 
                     num_obstacles: int = 3,
                     bounds: Tuple[np.ndarray, np.ndarray] = None,
@@ -99,20 +98,18 @@ class RandomEnvGenerator:
         #     'type': obstacle_type
         #     }
         #     self.obstacles.append(obstacle)
-            
 
     def clear_obstacles(self):
         """Clear all obstacles."""
         self.obstacles = []
-        
 
     def get_obstacles(self) -> List[Dict]:
         """Get list of current obstacles."""
         return self.obstacles.copy()
-        
 
     def generate_env(self):
         """Generate a randomized environment."""
+        self.set_env_bounds()
         self.set_initial_state()
         self.set_goal_state()
         self.add_obstacles()

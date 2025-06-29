@@ -12,7 +12,7 @@ import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-from utils.env_utils import RandomEnvGenerator
+from utils.env_utils import EnvironmentRandomizer
 
 
 @dataclass
@@ -43,7 +43,7 @@ class Args:
     """whether to randomize the environment"""
 
     # Algorithm specific arguments
-    env_id: str = "CartPole-v1"
+    env_id: str = "envs/QuadNav-v0"
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
@@ -78,6 +78,9 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
+    # environment specific arguments
+
+
     # to be filled in runtime
     batch_size: int = 0
     """the batch size (computed in runtime)"""
@@ -97,16 +100,16 @@ def make_env(env_id, idx, capture_video, run_name, gamma, randomize_env=False):
         
         # randomly modify the environment; create the object inside for lazy env creation for vectorized envs
         if randomize_env:
-            env_randomizer = RandomEnvGenerator(env)
+            env_randomizer = EnvironmentRandomizer(env)
             env_randomizer.generate_env()
 
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
         env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+        # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         # no need to set truncations in env.step() as TimeLimit wrapper handles it
         env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
         return env
@@ -233,15 +236,12 @@ if __name__ == "__main__":
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
-            # if "final_info" in infos:
-            #     for info in infos["final_info"]:
-            #         if info and "episode" in info:
-            if infos != {}:
-                for i in range(args.num_envs):
-                    if truncations[i] or terminations[i]:
-                        print(f"global_step={global_step}, episodic_return={infos['episode']['r'][i]}")
-                        writer.add_scalar("charts/episodic_return", infos["episode"]["r"][i], global_step)
-                        writer.add_scalar("charts/episodic_length", infos["episode"]["l"][i], global_step)
+            # upon episode completion, vectorEnv handles resets automatically
+            for i in range(args.num_envs):
+                if truncations[i] or terminations[i]:
+                    print(f"global_step={global_step}, episodic_return={infos['episode']['r'][i]}")
+                    writer.add_scalar("charts/episodic_return", infos["episode"]["r"][i], global_step)
+                    writer.add_scalar("charts/episodic_length", infos["episode"]["l"][i], global_step)
 
         # bootstrap value if not done
         with torch.no_grad():

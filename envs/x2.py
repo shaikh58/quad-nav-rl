@@ -48,23 +48,16 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             ],
             "render_fps": int(np.round(1.0 / self.dt)),
         }
-        # distance threshold to target locationfor success
+        # distance threshold to target location for success
         self._goal_threshold = 0.1
         # minimum required height above ground
         self._min_height = 0.1
-        # maximum allowed angular velocity
-        self._max_angular_velocity = 5.0  # rad/s
+        # maximum allowed roll/pitch/yaw rate (rad/s)
+        self._max_body_rate = 1.0
         # maximum allowed tilt angle (roll/pitch) (radians)
         self._max_tilt_angle = np.pi/4
-        # maximum allowed roll/pitch rate (rad/s)
-        self._max_roll_pitch_rate = 1.0
-        # maximum allowed yaw rate (rad/s)
-        self._max_yaw_rate = 1.0
 
         # user defined parameters
-        self.env_center = self.model.stat.center.copy()
-        # radius of environment
-        self.env_extent = self.model.stat.extent.copy()
         self._target_location = target_location
         # NOTE: the initial state is set to a default value env.init_qpos
         self._ctrl_cost_weight = ctrl_cost_weight
@@ -83,6 +76,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
         )
+        # initialize previous pos to current pos
+        self.prev_pos = self.data.qpos[:3].copy()
+        self.trajectory = None
 
 
     def control_cost(self, action):
@@ -96,10 +92,39 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         observation = np.concatenate((position, velocity))
         return observation
 
+    def set_trajectory(self, trajectory):
+        self.trajectory = trajectory
+    
+    def progress(self, trajectory):
+        # for straight line planner, trajectory is just the endpts of planner output
+        pt1 = trajectory[0]
+        pt2 = trajectory[-1]
+        unit_vector = (pt2 - pt1) / np.linalg.norm(pt2 - pt1)
+        progress = np.dot(self.data.qpos[:3] - pt1, unit_vector)
+        progress_prev = np.dot(self.prev_pos - pt1, unit_vector)
+        return progress - progress_prev
 
-    def _compute_reward(self, action):
-        # TODO: implement reward function with intermediate rewards
-        return 0
+
+    def _compute_reward(self, action, terminated, msg):
+        reward_components = {}
+        # progress along planned trajectory; note init_qpos was sampled by RandomEnvGenerator
+        curr_progress = self.progress(self.trajectory)
+        print("curr_progress: ", curr_progress)
+        reward_components["progress"] = curr_progress
+        # ground collision penalty
+        if terminated and msg == "collision_ground":
+            reward_components["collision_ground"] = -10
+        # obstacle collision penalty; not implemented yet
+        if terminated and msg == "collision_obstacles":
+            reward_components["collision_obstacles"] = -10
+        # success reward
+        if terminated and msg == "success":
+            reward_components["success"] = 10
+        # body rate penalty
+        body_rate = np.linalg.norm(self.data.qvel[3:6])
+        reward_components["body_rate"] = body_rate**2
+
+        return reward_components
 
 
     def reset_model(self):
@@ -144,11 +169,17 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
     def step(self, action):
         """
         Action is (4,) (thrust1, thrust2, thrust3, thrust4)
+        Trajectory is from planner (n_points, 3) (x, y, z)
         """
+        # set prev pos before taking env step
+        self.prev_pos = self.data.qpos[:3].copy()
         # takes env step. Sets data.ctrl to action
         self.do_simulation(action, self.frame_skip)
         terminated, msg = self._is_terminated()
-        fwd_reward = self._compute_reward(action)
+        fwd_reward = 0
+        reward_components = self._compute_reward(action, terminated, msg)
+        for k,v in reward_components.items():
+            fwd_reward += v
         ctrl_reward = self.control_cost(action)
         reward = fwd_reward - ctrl_reward
         observation = self._get_obs()
@@ -186,22 +217,12 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         
         def _check_collision_ground():
             """Check if quadrotor has collided with the ground."""
-            # TODO: implement collision with ground detection
-            return False
+            return self.data.qpos[2] < self._min_height
         
         def _check_oob():
             """Check if quadrotor is out of bounds."""
-            # TODO: implement out of bounds detection
-            return False
-        
-        def _check_unstable_flight():
-            """Check if quadrotor is unstable."""
-            # TODO: implement unstable flight detection
-            # angular velocity (norm of wx, wy, wz)
-            # roll/pitch rate (wx, wy)
-            # yaw rate (wz)
-            
-            return False
+            return np.linalg.norm(self.data.qpos[:3] - self.model.stat.center) > self.model.stat.extent
+
 
         if _check_success():
             return True, "success"
@@ -211,7 +232,5 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             return True, "collision_ground"
         if _check_oob():
             return True, "out_of_bounds"
-        if _check_unstable_flight():
-            return True, "unstable_flight"
 
         return False, "not_terminated"
