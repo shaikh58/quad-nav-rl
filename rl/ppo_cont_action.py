@@ -3,6 +3,8 @@ import os
 import random
 import time
 from dataclasses import dataclass
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gymnasium as gym
 import numpy as np
@@ -12,7 +14,8 @@ import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-from utils.env_utils import EnvironmentRandomizer
+from utils.env_utils import make_env, make_single_env
+from envs import *
 
 
 @dataclass
@@ -27,7 +30,7 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "quad_nav_rl"
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
@@ -39,17 +42,15 @@ class Args:
     """whether to upload the saved model to huggingface"""
     hf_entity: str = ""
     """the user or org name of the model repository from the Hugging Face Hub"""
-    randomize_env: bool = False
-    """whether to randomize the environment"""
 
     # Algorithm specific arguments
     env_id: str = "envs/QuadNav-v0"
     """the id of the environment"""
-    total_timesteps: int = 1000000
+    total_timesteps: int = 10
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 3
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -79,7 +80,20 @@ class Args:
     """the target KL divergence threshold"""
 
     # environment specific arguments
-
+    randomize_env: bool = True
+    """whether to randomize the environment"""
+    use_planner: bool = True
+    """whether to use a planner"""
+    planner_type: str = "straight_line"
+    """the type of planner to use"""
+    env_radius_lb: float = 5
+    """the lower bound of the environment radius"""
+    env_radius_ub: float = 20
+    """the upper bound of the environment radius"""
+    ctrl_cost_weight: float = 0.1
+    """the weight of the control cost"""
+    reset_noise_scale: float = 0.1
+    """the scale of the reset noise"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -88,33 +102,6 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
-
-
-def make_env(env_id, idx, capture_video, run_name, gamma, randomize_env=False):
-    def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
-        
-        # randomly modify the environment; create the object inside for lazy env creation for vectorized envs
-        if randomize_env:
-            env_randomizer = EnvironmentRandomizer(env)
-            env_randomizer.generate_env()
-
-        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = gym.wrappers.ClipAction(env)
-        env = gym.wrappers.NormalizeObservation(env)
-        # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-        # no need to set truncations in env.step() as TimeLimit wrapper handles it
-        env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
-        return env
-
-    return thunk
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -188,8 +175,14 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, randomize_env=args.randomize_env) for i in range(args.num_envs)]
+    env_kwargs = {
+        "env_radius_lb": args.env_radius_lb,
+        "env_radius_ub": args.env_radius_ub,
+        "ctrl_cost_weight": args.ctrl_cost_weight,
+        "reset_noise_scale": args.reset_noise_scale,
+    } # note the target and start location are set in the env randomizer
+    envs = gym.vector.SyncVectorEnv(# NOTE: the seed is the same for all envs as this gives much better results
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type, randomize_env=args.randomize_env, **env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -208,6 +201,8 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
+    for i, env in enumerate(envs.envs): 
+        print(f"Env: {i}", env.unwrapped.init_qpos[:3], env.unwrapped._target_location)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
@@ -237,11 +232,11 @@ if __name__ == "__main__":
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
             # upon episode completion, vectorEnv handles resets automatically
-            for i in range(args.num_envs):
-                if truncations[i] or terminations[i]:
-                    print(f"global_step={global_step}, episodic_return={infos['episode']['r'][i]}")
-                    writer.add_scalar("charts/episodic_return", infos["episode"]["r"][i], global_step)
-                    writer.add_scalar("charts/episodic_length", infos["episode"]["l"][i], global_step)
+            for k in range(args.num_envs):
+                if truncations[k] or terminations[k]:
+                    # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
+                    writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
+                    writer.add_scalar("charts/episodic_length", infos["episode"]["l"][k], global_step)
 
         # bootstrap value if not done
         with torch.no_grad():
@@ -338,8 +333,16 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
+        print("SPS:", int(global_step / (time.time() - start_time)), "global_step:", global_step)
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        # track gradients
+        for name, param in agent.named_parameters():
+            if param.grad is not None:
+                writer.add_scalar(f'gradients/{name}/norm', param.grad.norm(), global_step)
+                writer.add_histogram(f'gradients/{name}/histogram', param.grad, global_step)
+    print("Total training time:", time.time() - start_time)
+    # save some videos (create an env, rollout, and capture the video)
+
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"

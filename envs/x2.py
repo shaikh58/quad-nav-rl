@@ -3,16 +3,29 @@ import gymnasium as gym
 from gymnasium.envs.mujoco import MujocoEnv
 from gymnasium import utils
 from gymnasium.spaces import Box
-
+import os
 
 DEFAULT_CAMERA_CONFIG = {
     "distance": 4.0,
 }
+GOAL_THRESHOLD = 0.1
+MIN_HEIGHT = 0.1
+MAX_BODY_RATE = 1.0
+MAX_TILT_ANGLE = np.pi/4
 
 class QuadNavEnv(MujocoEnv, utils.EzPickle):
+    metadata = {
+        "render_modes": [
+            "human",
+            "rgb_array",
+            "depth_array",
+            "rgbd_tuple",
+        ],
+        "render_fps": 20,
+    }
     def __init__(
         self, 
-        xml_file: str = "./models/skydio_x2/scene.xml", 
+        xml_file: str = None, 
         frame_skip: int = 5, 
         default_camera_config: dict[str, float | int] = DEFAULT_CAMERA_CONFIG,
         ctrl_cost_weight: float = 0.1, 
@@ -20,6 +33,12 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         target_location: np.ndarray = np.array([0, 0, 0]),
         **kwargs,
     ):
+        self.render_mode = kwargs.get("render_mode", "rgb_array")
+
+        if xml_file is None:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            xml_file = os.path.join(current_dir, "..", "models", "skydio_x2", "scene.xml")
+
         utils.EzPickle.__init__(
             self,
             xml_file,
@@ -36,26 +55,16 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             frame_skip,
             observation_space=None,
             default_camera_config=default_camera_config,
-            **kwargs,
+            render_mode=self.render_mode,
         )
-
-        self.metadata = {
-            "render_modes": [
-                "human",
-                "rgb_array",
-                "depth_array",
-                "rgbd_tuple",
-            ],
-            "render_fps": int(np.round(1.0 / self.dt)),
-        }
         # distance threshold to target location for success
-        self._goal_threshold = 0.1
+        self._goal_threshold = GOAL_THRESHOLD
         # minimum required height above ground
-        self._min_height = 0.1
+        self._min_height = MIN_HEIGHT
         # maximum allowed roll/pitch/yaw rate (rad/s)
-        self._max_body_rate = 1.0
+        self._max_body_rate = MAX_BODY_RATE
         # maximum allowed tilt angle (roll/pitch) (radians)
-        self._max_tilt_angle = np.pi/4
+        self._max_tilt_angle = MAX_TILT_ANGLE
 
         # user defined parameters
         self._target_location = target_location
@@ -92,8 +101,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         observation = np.concatenate((position, velocity))
         return observation
 
-    def set_trajectory(self, trajectory):
+    def set_trajectory(self, trajectory, info):
         self.trajectory = trajectory
+        self.trajectory_info = info
     
     def progress(self, trajectory):
         # for straight line planner, trajectory is just the endpts of planner output
@@ -109,7 +119,6 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         reward_components = {}
         # progress along planned trajectory; note init_qpos was sampled by RandomEnvGenerator
         curr_progress = self.progress(self.trajectory)
-        print("curr_progress: ", curr_progress)
         reward_components["progress"] = curr_progress
         # ground collision penalty
         if terminated and msg == "collision_ground":
@@ -123,7 +132,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         # body rate penalty
         body_rate = np.linalg.norm(self.data.qvel[3:6])
         reward_components["body_rate"] = body_rate**2
-
+        # print("reward_components: ", reward_components)
         return reward_components
 
 

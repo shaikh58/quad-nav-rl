@@ -1,5 +1,47 @@
 import numpy as np
 from typing import List, Dict, Tuple
+import gymnasium as gym
+from utils.planner import StraightLinePlanner
+import random
+
+PLANNER_TYPES = {
+    "straight_line": StraightLinePlanner,
+}
+
+
+def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None, planner_type=None, randomize_env=False, **kwargs):
+    def thunk():
+        random.seed(seed)
+        np.random.seed(seed)
+
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array", **kwargs)
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id, **kwargs)
+        
+        # randomly modify the environment; create the object inside for lazy env creation for vectorized envs
+        if randomize_env:
+            env_randomizer = EnvironmentRandomizer(env, seed=seed, **kwargs)
+            env_randomizer.generate_env()
+
+        if use_planner:
+            planner = PLANNER_TYPES[planner_type]()
+            trajectory, info = planner.plan_trajectory(env.unwrapped.init_qpos[:3], env.unwrapped._target_location)
+            env.unwrapped.set_trajectory(trajectory, info)
+
+        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = gym.wrappers.ClipAction(env)
+        env = gym.wrappers.NormalizeObservation(env)
+        # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
+        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
+        # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        # no need to set truncations in env.step() as TimeLimit wrapper handles it
+        env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
+        return env
+
+    return thunk
 
 
 class EnvironmentRandomizer:
@@ -11,29 +53,31 @@ class EnvironmentRandomizer:
     - Obstacle positions, sizes, and types
     """
     
-    def __init__(self, env, **kwargs):
+    def __init__(self, env, seed, **kwargs):
         self.env = env
         self.kwargs = kwargs
         self.obstacles = []
-        self.env_radius_lb = 3
-        self.env_radius_ub = 15
+        self.env_radius_lb = self.kwargs.get("env_radius_lb", 3)
+        self.env_radius_ub = self.kwargs.get("env_radius_ub", 15)
         self.start_orientation = np.array([1, 0, 0, 0])
         self.start_vel = np.array([0, 0, 0, 0, 0, 0])
+        
+        self.rng = np.random.default_rng(seed)
 
     def set_env_bounds(self):
-        self.env.unwrapped.model.stat.extent = self.env.unwrapped.np_random.uniform(self.env_radius_lb, self.env_radius_ub)
+        self.env.unwrapped.model.stat.extent = self.rng.uniform(self.env_radius_lb, self.env_radius_ub)
         
     def sample_sphere(self):
         # sample x,y inside a spherical region; center, extent from the model file
-        azimuth = self.env.unwrapped.np_random.uniform(0, 2*np.pi) 
-        elevation = self.env.unwrapped.np_random.uniform(0, np.pi/2)
+        azimuth = self.rng.uniform(0, 2*np.pi) 
+        elevation = self.rng.uniform(0, np.pi/2)
         # extent is radius of the sphere
         x = self.env.unwrapped.model.stat.extent * np.cos(azimuth) * np.sin(elevation)
         y = self.env.unwrapped.model.stat.extent * np.sin(azimuth) * np.sin(elevation)
         # constrain z so that the euclidean dist to center is less than extent
         x_c, y_c, z_c = self.env.unwrapped.model.stat.center
         z_max = np.sqrt(self.env.unwrapped.model.stat.extent**2 - (x-x_c)**2 - (y-y_c)**2) + z_c
-        z = self.env.unwrapped.np_random.uniform(z_c, z_max)
+        z = self.rng.uniform(z_c, z_max)
         return np.array([x, y, z])
         
     def set_initial_state(self):

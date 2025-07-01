@@ -13,7 +13,7 @@ class BasePlanner(ABC):
     to generate a reference trajectory for the controller to track.
     """
     
-    def __init__(self, env, **kwargs):
+    def __init__(self, **kwargs):
         """
         Initialize the planner.
         
@@ -21,7 +21,6 @@ class BasePlanner(ABC):
             env: The environment object containing obstacle and world information
             **kwargs: Additional planner-specific parameters
         """
-        self.env = env
         self._setup_planner(**kwargs)
     
     @abstractmethod
@@ -77,7 +76,8 @@ class StraightLinePlanner(BasePlanner):
         
     def plan_trajectory(
         self,
-        **kwargs
+        start_pos: np.ndarray,
+        goal_pos: np.ndarray,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         Plan a straight-line trajectory with a fixed step size.
@@ -87,8 +87,8 @@ class StraightLinePlanner(BasePlanner):
             info: Planning information
         """
         # Extract positions
-        current_pos = self.env.unwrapped.data.qpos[:3]
-        goal_pos = self.env.unwrapped._target_location
+        current_pos = start_pos
+        goal_pos = goal_pos
         
         # Calculate distance and direction
         displacement = goal_pos - current_pos
