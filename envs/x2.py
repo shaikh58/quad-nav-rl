@@ -8,10 +8,6 @@ import os
 DEFAULT_CAMERA_CONFIG = {
     "distance": 4.0,
 }
-GOAL_THRESHOLD = 0.1
-MIN_HEIGHT = 0.1
-MAX_BODY_RATE = 1.0
-MAX_TILT_ANGLE = np.pi/4
 
 class QuadNavEnv(MujocoEnv, utils.EzPickle):
     metadata = {
@@ -28,9 +24,16 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         xml_file: str = None, 
         frame_skip: int = 5, 
         default_camera_config: dict[str, float | int] = DEFAULT_CAMERA_CONFIG,
-        ctrl_cost_weight: float = 0.1, 
-        reset_noise_scale: float = 0.1,
-        target_location: np.ndarray = np.array([0, 0, 0]),
+        goal_threshold: float = 0.1,
+        min_height: float = 0.1,
+        ctrl_cost_weight: float = 0.1,
+        progress_weight: float = 0.1,
+        body_rate_weight: float = 0.1,
+        collision_ground_weight: float = 1,
+        collision_obstacles_weight: float = 1,
+        success_weight: float = 10,
+        target_location: np.ndarray = None, # set by randomizer; user overrides also handled by randomizer
+        start_location: np.ndarray = None, # set by randomizer; user overrides also handled by randomizer
         **kwargs,
     ):
         self.render_mode = kwargs.get("render_mode", "rgb_array")
@@ -45,8 +48,11 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             frame_skip,
             default_camera_config,
             ctrl_cost_weight,
-            reset_noise_scale,
-            target_location,
+            progress_weight,
+            body_rate_weight,
+            collision_ground_weight,
+            collision_obstacles_weight,
+            success_weight,
             **kwargs,
         )
 
@@ -58,19 +64,19 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             render_mode=self.render_mode,
         )
         # distance threshold to target location for success
-        self._goal_threshold = GOAL_THRESHOLD
+        self._goal_threshold = goal_threshold
         # minimum required height above ground
-        self._min_height = MIN_HEIGHT
-        # maximum allowed roll/pitch/yaw rate (rad/s)
-        self._max_body_rate = MAX_BODY_RATE
-        # maximum allowed tilt angle (roll/pitch) (radians)
-        self._max_tilt_angle = MAX_TILT_ANGLE
+        self._min_height = min_height
 
         # user defined parameters
         self._target_location = target_location
         # NOTE: the initial state is set to a default value env.init_qpos
         self._ctrl_cost_weight = ctrl_cost_weight
-        self._reset_noise_scale = reset_noise_scale
+        self._progress_weight = progress_weight
+        self._body_rate_weight = body_rate_weight
+        self._collision_ground_weight = collision_ground_weight
+        self._collision_obstacles_weight = collision_obstacles_weight
+        self._success_weight = success_weight
 
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
@@ -115,35 +121,31 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         return progress - progress_prev
 
 
-    def _compute_reward(self, action, terminated, msg):
+    def _compute_reward(self, terminated, msg):
         reward_components = {}
         # progress along planned trajectory; note init_qpos was sampled by RandomEnvGenerator
         curr_progress = self.progress(self.trajectory)
-        reward_components["progress"] = curr_progress
+        reward_components["progress"] = self._progress_weight * curr_progress
         # ground collision penalty
         if terminated and msg == "collision_ground":
-            reward_components["collision_ground"] = -10
+            reward_components["collision_ground"] = -self._collision_ground_weight
         # obstacle collision penalty; not implemented yet
         if terminated and msg == "collision_obstacles":
-            reward_components["collision_obstacles"] = -10
+            reward_components["collision_obstacles"] = -self._collision_obstacles_weight
         # success reward
         if terminated and msg == "success":
-            reward_components["success"] = 10
+            reward_components["success"] = self._success_weight
         # body rate penalty
         body_rate = np.linalg.norm(self.data.qvel[3:6])
-        reward_components["body_rate"] = body_rate**2
+        reward_components["body_rate"] = -self._body_rate_weight * body_rate**2
         # print("reward_components: ", reward_components)
         return reward_components
 
 
     def reset_model(self):
         """Resets the state of the environment and returns an initial observation."""
-        # noise_low = -self._reset_noise_scale
-        # noise_high = self._reset_noise_scale
         # self.init_qpos comes from parent class 
-        qpos = self.init_qpos #+ self.np_random.uniform(
-            # low=noise_low, high=noise_high, size=self.model.nq
-        # )
+        qpos = self.init_qpos
         qvel = self.init_qvel # initialize at hover
         # set action to hover thrust
         self.data.ctrl = self.hover_thrust
@@ -186,7 +188,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self.do_simulation(action, self.frame_skip)
         terminated, msg = self._is_terminated()
         fwd_reward = 0
-        reward_components = self._compute_reward(action, terminated, msg)
+        reward_components = self._compute_reward(terminated, msg)
         for k,v in reward_components.items():
             fwd_reward += v
         ctrl_reward = self.control_cost(action)
@@ -197,6 +199,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         info["fwd_reward"] = fwd_reward
         info["ctrl_reward"] = ctrl_reward
         info["reward"] = reward
+        info["reward_components"] = reward_components
         info["termination_msg"] = msg
         # episode length is automatically added by RecordEpisodeStatistics wrapper
 

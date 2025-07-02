@@ -14,9 +14,8 @@ import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
-from utils.env_utils import make_env, make_single_env
-from envs import *
-
+from utils.env_utils import make_env
+import envs
 
 @dataclass
 class Args:
@@ -90,10 +89,26 @@ class Args:
     """the lower bound of the environment radius"""
     env_radius_ub: float = 20
     """the upper bound of the environment radius"""
+    goal_threshold: float = 0.1
+    """distance to goal for success"""
+    min_height: float = 0.1
+    """minimum height above ground before ground collision"""
     ctrl_cost_weight: float = 0.1
-    """the weight of the control cost"""
-    reset_noise_scale: float = 0.1
-    """the scale of the reset noise"""
+    """control cost penalty for reward"""
+    progress_weight: float = 0.1
+    """weight for progress term in reward"""
+    body_rate_weight: float = 0.1
+    """weight for body rate penalty in reward"""
+    collision_ground_weight: float = 1
+    """weight for ground collision penalty in reward"""
+    collision_obstacles_weight: float = 1
+    """weight for obstacle collision penalty in reward"""
+    success_weight: float = 10
+    """weight for success term in reward"""
+    start_location: str = None
+    """the start location"""
+    target_location: str = None
+    """the target location"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -127,6 +142,9 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
         )
+        # Initialize final layer bias to output hover thrust
+        with torch.no_grad():
+            self.actor_mean[-1].bias.fill_(envs.envs[0].unwrapped.model.keyframe('hover').ctrl[0])
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
     def get_value(self, x):
@@ -175,14 +193,25 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
+    target_location = [float(y) for x in args.target_location.split(",") for y in x if y.isdigit()] if args.target_location is not None else None
+    start_location = [float(y) for x in args.start_location.split(",") for y in x if y.isdigit()] if args.start_location is not None else None
+
     env_kwargs = {
         "env_radius_lb": args.env_radius_lb,
         "env_radius_ub": args.env_radius_ub,
         "ctrl_cost_weight": args.ctrl_cost_weight,
-        "reset_noise_scale": args.reset_noise_scale,
-    } # note the target and start location are set in the env randomizer
+        "progress_weight": args.progress_weight,
+        "body_rate_weight": args.body_rate_weight,
+        "collision_ground_weight": args.collision_ground_weight,
+        "collision_obstacles_weight": args.collision_obstacles_weight,
+        "success_weight": args.success_weight,
+        "goal_threshold": args.goal_threshold,
+        "min_height": args.min_height,
+        "target_location": target_location,
+        "start_location": start_location,
+    } # note the target and start location are set in the env randomizer but can be overridden by the user
     envs = gym.vector.SyncVectorEnv(# NOTE: the seed is the same for all envs as this gives much better results
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type, randomize_env=args.randomize_env, **env_kwargs) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed+i, use_planner=args.use_planner, planner_type=args.planner_type, randomize_env=args.randomize_env, **env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -200,7 +229,8 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=args.seed)
+    next_obs, _ = envs.reset()
+    envs.action_space.seed()
     for i, env in enumerate(envs.envs): 
         print(f"Env: {i}", env.unwrapped.init_qpos[:3], env.unwrapped._target_location)
     next_obs = torch.Tensor(next_obs).to(device)
@@ -348,20 +378,20 @@ if __name__ == "__main__":
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save(agent.state_dict(), model_path)
         print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.ppo_eval import evaluate
+        # from cleanrl_utils.evals.ppo_eval import evaluate
 
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=Agent,
-            device=device,
-            gamma=args.gamma,
-        )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
+        # episodic_returns = evaluate(
+        #     model_path,
+        #     make_env,
+        #     args.env_id,
+        #     eval_episodes=10,
+        #     run_name=f"{run_name}-eval",
+        #     Model=Agent,
+        #     device=device,
+        #     gamma=args.gamma,
+        # )
+        # for idx, episodic_return in enumerate(episodic_returns):
+        #     writer.add_scalar("eval/episodic_return", episodic_return, idx)
 
         if args.upload_model:
             from cleanrl_utils.huggingface import push_to_hub

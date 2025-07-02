@@ -16,7 +16,8 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
 
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", **kwargs)
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            video_path = kwargs.get("video_path", f"videos/{run_name}")
+            env = gym.wrappers.RecordVideo(env, f"{video_path}/{run_name}")
         else:
             env = gym.make(env_id, **kwargs)
         
@@ -64,10 +65,10 @@ class EnvironmentRandomizer:
         
         self.rng = np.random.default_rng(seed)
 
-    def set_env_bounds(self):
+    def set_env_bounds(self) -> None:
         self.env.unwrapped.model.stat.extent = self.rng.uniform(self.env_radius_lb, self.env_radius_ub)
         
-    def sample_sphere(self):
+    def sample_sphere(self) -> np.ndarray:
         # sample x,y inside a spherical region; center, extent from the model file
         azimuth = self.rng.uniform(0, 2*np.pi) 
         elevation = self.rng.uniform(0, np.pi/2)
@@ -80,22 +81,32 @@ class EnvironmentRandomizer:
         z = self.rng.uniform(z_c, z_max)
         return np.array([x, y, z])
         
-    def set_initial_state(self):
+    def set_initial_state(self) -> None:
         """
         Set initial state of the environment.
         """
-        self.start_pos = self.sample_sphere()
-        # init_qpos is the state that the env initializes to when reset() is called
-        self.env.unwrapped.init_qpos[:3] = self.start_pos
+        # allow user override
+        if self.kwargs.get("start_location") is not None:
+            self.env.unwrapped.init_qpos[:3] = np.array(self.kwargs.get("start_location"))
+        else:
+            self.start_pos = self.sample_sphere()
+            # init_qpos is the state that the env initializes to when reset() is called
+            self.env.unwrapped.init_qpos[:3] = self.start_pos
+
         # start upright
         self.env.unwrapped.init_qpos[3:7] = self.start_orientation
         # start stationary
         self.env.unwrapped.init_qvel[:] = self.start_vel
 
-    def set_goal_state(self, min_distance: float = 1.0):
+    def set_goal_state(self, min_distance: float = 1.0) -> None:
         """
         Set the goal state of the environment.
         """
+        # allow user override
+        if self.kwargs.get("target_location") is not None:
+            self.env.unwrapped._target_location = np.array(self.kwargs.get("target_location"))
+            return
+        
         # Ensure target is at least min_distance away from start
         max_attempts = 300
         for _ in range(max_attempts):
@@ -143,7 +154,7 @@ class EnvironmentRandomizer:
         #     }
         #     self.obstacles.append(obstacle)
 
-    def clear_obstacles(self):
+    def clear_obstacles(self) -> None:
         """Clear all obstacles."""
         self.obstacles = []
 
@@ -151,8 +162,12 @@ class EnvironmentRandomizer:
         """Get list of current obstacles."""
         return self.obstacles.copy()
 
-    def generate_env(self):
+    def generate_env(self) -> None:
         """Generate a randomized environment."""
+        if self.kwargs.get("start_location") is not None or self.kwargs.get("target_location") is not None:
+            print("Start/goal locations overriden by user - environment bounds will be adjusted accordingly")
+            goal_dist_center = np.linalg.norm(np.array(self.kwargs.get("target_location")) - self.env.unwrapped.model.stat.center)
+            self.env_radius_ub = goal_dist_center + 1.0
         self.set_env_bounds()
         self.set_initial_state()
         self.set_goal_state()
