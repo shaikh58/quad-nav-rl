@@ -72,13 +72,11 @@ class EnvironmentRandomizer:
         # sample x,y inside a spherical region; center, extent from the model file
         azimuth = self.rng.uniform(0, 2*np.pi) 
         elevation = self.rng.uniform(0, np.pi/2)
+        radius = self.rng.uniform(0, self.env.unwrapped.model.stat.extent)
         # extent is radius of the sphere
-        x = self.env.unwrapped.model.stat.extent * np.cos(azimuth) * np.sin(elevation)
-        y = self.env.unwrapped.model.stat.extent * np.sin(azimuth) * np.sin(elevation)
-        # constrain z so that the euclidean dist to center is less than extent
-        x_c, y_c, z_c = self.env.unwrapped.model.stat.center
-        z_max = np.sqrt(self.env.unwrapped.model.stat.extent**2 - (x-x_c)**2 - (y-y_c)**2) + z_c
-        z = self.rng.uniform(z_c, z_max)
+        x = radius * np.cos(elevation) * np.sin(azimuth)
+        y = radius * np.cos(azimuth) * np.cos(elevation)
+        z = radius * np.sin(elevation)
         return np.array([x, y, z])
         
     def set_initial_state(self) -> None:

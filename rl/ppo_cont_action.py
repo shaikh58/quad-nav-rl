@@ -230,9 +230,12 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
     next_obs, _ = envs.reset()
-    envs.action_space.seed()
+    # envs.action_space.seed()
     for i, env in enumerate(envs.envs): 
-        print(f"Env: {i}", env.unwrapped.init_qpos[:3], env.unwrapped._target_location)
+        print(f"Env: {i}", "Start: ", env.unwrapped.init_qpos[:3], "Target: ", env.unwrapped._target_location, 
+        "Env radius: ", env.unwrapped.model.stat.extent, 
+        "Distance from center: ", np.linalg.norm(env.unwrapped.init_qpos[:3] - env.unwrapped.model.stat.center),
+        "Target distance from center: ", np.linalg.norm(env.unwrapped._target_location - env.unwrapped.model.stat.center))
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
