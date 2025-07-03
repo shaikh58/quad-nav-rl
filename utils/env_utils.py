@@ -66,7 +66,10 @@ class EnvironmentRandomizer:
         self.rng = np.random.default_rng(seed)
 
     def set_env_bounds(self) -> None:
-        self.env.unwrapped.model.stat.extent = self.rng.uniform(self.env_radius_lb, self.env_radius_ub)
+        if self.kwargs.get("start_location") is not None or self.kwargs.get("target_location") is not None:
+            self.env.unwrapped.set_env_radius(self.env_radius_ub)
+        else:
+            self.env.unwrapped.set_env_radius(self.rng.uniform(self.env_radius_lb, self.env_radius_ub))
         
     def sample_sphere(self) -> np.ndarray:
         # sample x,y inside a spherical region; center, extent from the model file
@@ -83,18 +86,17 @@ class EnvironmentRandomizer:
         """
         Set initial state of the environment.
         """
+        
         # allow user override
         if self.kwargs.get("start_location") is not None:
-            self.env.unwrapped.init_qpos[:3] = np.array(self.kwargs.get("start_location"))
+            self.start_pos = np.array(self.kwargs.get("start_location"))
         else:
             self.start_pos = self.sample_sphere()
             # init_qpos is the state that the env initializes to when reset() is called
             self.env.unwrapped.init_qpos[:3] = self.start_pos
 
-        # start upright
-        self.env.unwrapped.init_qpos[3:7] = self.start_orientation
-        # start stationary
-        self.env.unwrapped.init_qvel[:] = self.start_vel
+        self.env.unwrapped.set_start_location(self.start_pos, self.start_orientation, self.start_vel)
+        
 
     def set_goal_state(self, min_distance: float = 1.0) -> None:
         """
@@ -102,7 +104,7 @@ class EnvironmentRandomizer:
         """
         # allow user override
         if self.kwargs.get("target_location") is not None:
-            self.env.unwrapped._target_location = np.array(self.kwargs.get("target_location"))
+            self.env.unwrapped.set_target_location(np.array(self.kwargs.get("target_location")))
             return
         
         # Ensure target is at least min_distance away from start
@@ -112,7 +114,7 @@ class EnvironmentRandomizer:
             if np.linalg.norm(target_pos - self.start_pos) >= min_distance:
                 break
 
-        self.env.unwrapped._target_location = target_pos
+        self.env.unwrapped.set_target_location(target_pos)
                 
     def add_obstacles(self, 
                     num_obstacles: int = 3,
@@ -165,7 +167,9 @@ class EnvironmentRandomizer:
         if self.kwargs.get("start_location") is not None or self.kwargs.get("target_location") is not None:
             print("Start/goal locations overriden by user - environment bounds will be adjusted accordingly")
             goal_dist_center = np.linalg.norm(np.array(self.kwargs.get("target_location")) - self.env.unwrapped.model.stat.center)
-            self.env_radius_ub = goal_dist_center + 1.0
+            start_dist_center = np.linalg.norm(np.array(self.kwargs.get("start_location")) - self.env.unwrapped.model.stat.center)
+            self.env_radius_ub = max(goal_dist_center, start_dist_center) + 2.0
+            print("New env radius ub: ", self.env_radius_ub)
         self.set_env_bounds()
         self.set_initial_state()
         self.set_goal_state()

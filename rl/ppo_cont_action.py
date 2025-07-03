@@ -103,6 +103,8 @@ class Args:
     """weight for ground collision penalty in reward"""
     collision_obstacles_weight: float = 1
     """weight for obstacle collision penalty in reward"""
+    out_of_bounds_weight: float = 1
+    """weight for out of bounds penalty in reward"""
     success_weight: float = 10
     """weight for success term in reward"""
     start_location: str = None
@@ -204,6 +206,7 @@ if __name__ == "__main__":
         "body_rate_weight": args.body_rate_weight,
         "collision_ground_weight": args.collision_ground_weight,
         "collision_obstacles_weight": args.collision_obstacles_weight,
+        "out_of_bounds_weight": args.out_of_bounds_weight,
         "success_weight": args.success_weight,
         "goal_threshold": args.goal_threshold,
         "min_height": args.min_height,
@@ -381,20 +384,42 @@ if __name__ == "__main__":
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         torch.save(agent.state_dict(), model_path)
         print(f"model saved to {model_path}")
-        # from cleanrl_utils.evals.ppo_eval import evaluate
 
-        # episodic_returns = evaluate(
-        #     model_path,
-        #     make_env,
-        #     args.env_id,
-        #     eval_episodes=10,
-        #     run_name=f"{run_name}-eval",
-        #     Model=Agent,
-        #     device=device,
-        #     gamma=args.gamma,
-        # )
-        # for idx, episodic_return in enumerate(episodic_returns):
-        #     writer.add_scalar("eval/episodic_return", episodic_return, idx)
+        print("Beginning eval...") 
+        # get the actual start/goal/extent used for training (after randomization)
+        start_location = envs.envs[0].unwrapped.init_qpos[:3]
+        target_location = envs.envs[0].unwrapped._target_location
+        radius = envs.envs[0].unwrapped.model.stat.extent
+        # override the env kwargs with the actual start/goal/extent used for training
+        env_kwargs["start_location"] = start_location
+        env_kwargs["target_location"] = target_location
+        env_kwargs["radius"] = radius
+
+        # custom eval using exact same env as env of rank 0 (this is the env that has video capture during training)
+        envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference
+        [make_env(args.env_id, 0, True, 
+        run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type,  
+        randomize_env=False, **env_kwargs
+        ) for i in range(1)]
+        )
+
+        print("Initial state: ", envs.envs[0].unwrapped.init_qpos[:3], "\n", "Target location: ", envs.envs[0].unwrapped._target_location, 
+        "\n", "Environment extent: ", envs.envs[0].unwrapped.model.stat.extent,"\n",
+        "Distance from center: ", np.linalg.norm(envs.envs[0].unwrapped.init_qpos[:3] - envs.envs[0].unwrapped.model.stat.center))
+
+        # reset the env to set the start/goal pos according to randomizer
+        obs, _ = envs.reset()
+        for i in range(1000):
+            if i % 100 == 0: print("Episode: ", i)
+            with torch.no_grad():
+                action = agent.actor_mean(torch.tensor(obs)) # deterministic action during inference
+            obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
+            # rendering done with RecordVideo wrapper
+            if terminated or truncated: 
+                print("State: ", obs[0,:3], "Action: ", action, "Reward: ", reward, "Terminated: ", terminated, "Info: ", info)
+            episode_over = terminated or truncated
+
+        envs.close()
 
         if args.upload_model:
             from cleanrl_utils.huggingface import push_to_hub

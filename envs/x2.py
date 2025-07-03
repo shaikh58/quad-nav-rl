@@ -31,9 +31,11 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         body_rate_weight: float = 0.1,
         collision_ground_weight: float = 1,
         collision_obstacles_weight: float = 1,
+        out_of_bounds_weight: float = 1,
         success_weight: float = 10,
         target_location: np.ndarray = None, # set by randomizer; user overrides also handled by randomizer
         start_location: np.ndarray = None, # set by randomizer; user overrides also handled by randomizer
+        radius: float = None, # set by randomizer; user overrides also handled by randomizer
         **kwargs,
     ):
         self.render_mode = kwargs.get("render_mode", "rgb_array")
@@ -52,6 +54,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             body_rate_weight,
             collision_ground_weight,
             collision_obstacles_weight,
+            out_of_bounds_weight,
             success_weight,
             **kwargs,
         )
@@ -70,13 +73,18 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
 
         # user defined parameters
         self._target_location = target_location
+        self._start_location = start_location
+        self._radius = radius
         # NOTE: the initial state is set to a default value env.init_qpos
         self._ctrl_cost_weight = ctrl_cost_weight
         self._progress_weight = progress_weight
         self._body_rate_weight = body_rate_weight
         self._collision_ground_weight = collision_ground_weight
         self._collision_obstacles_weight = collision_obstacles_weight
+        self._out_of_bounds_weight = out_of_bounds_weight
         self._success_weight = success_weight
+        self.start_orientation = np.array([1, 0, 0, 0])
+        self.start_vel = np.array([0, 0, 0, 0, 0, 0])
 
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
@@ -95,6 +103,24 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self.prev_pos = self.data.qpos[:3].copy()
         self.trajectory = None
 
+        # if user has passed in env params, set them
+        if self._start_location is not None and self._target_location is not None and self._radius is not None:
+            self.set_start_location(self._start_location, self.start_orientation, self.start_vel)
+            self.set_target_location(self._target_location) 
+            self.set_env_radius(self._radius)
+
+    def set_start_location(self, start_location, start_orientation, start_vel):
+        self.init_qpos[:3] = start_location
+        # start upright
+        self.init_qpos[3:7] = start_orientation
+        # start stationary
+        self.init_qvel[:] = start_vel
+    
+    def set_target_location(self, target_location):
+        self._target_location = target_location
+    
+    def set_env_radius(self, radius):
+        self.model.stat.extent = radius
 
     def control_cost(self, action):
         control_cost = self._ctrl_cost_weight * np.sum(np.square(action))
@@ -138,7 +164,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         # body rate penalty
         body_rate = np.linalg.norm(self.data.qvel[3:6])
         reward_components["body_rate"] = -self._body_rate_weight * body_rate**2
-        # print("reward_components: ", reward_components)
+        # out of bounds penalty
+        if terminated and msg == "out_of_bounds":
+            reward_components["out_of_bounds"] = -self._out_of_bounds_weight
         return reward_components
 
 
