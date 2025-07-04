@@ -89,7 +89,7 @@ class Args:
     """the lower bound of the environment radius"""
     env_radius_ub: float = 20
     """the upper bound of the environment radius"""
-    goal_threshold: float = 0.1
+    goal_threshold: float = 1.0
     """distance to goal for success"""
     min_height: float = 0.1
     """minimum height above ground before ground collision"""
@@ -270,6 +270,8 @@ if __name__ == "__main__":
             # upon episode completion, vectorEnv handles resets automatically
             for k in range(args.num_envs):
                 if truncations[k] or terminations[k]:
+                    if infos["termination_msg"][k] == "success":
+                        print("Success!!!!!!!!! \n \n \n")
                     # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
                     writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
                     writer.add_scalar("charts/episodic_length", infos["episode"]["l"][k], global_step)
@@ -399,7 +401,7 @@ if __name__ == "__main__":
         envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference
         [make_env(args.env_id, 0, True, 
         run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type,  
-        randomize_env=False, **env_kwargs
+        randomize_env=False, video_path=f"videos/{run_name}-eval", **env_kwargs
         ) for i in range(1)]
         )
 
