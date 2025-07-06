@@ -30,19 +30,24 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
             planner = PLANNER_TYPES[planner_type]()
             trajectory, info = planner.plan_trajectory(env.unwrapped.init_qpos[:3], env.unwrapped._target_location)
             env.unwrapped.set_trajectory(trajectory, info)
+            
+        env.action_space.seed(seed)
 
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
+        # env = gym.wrappers.RescaleAction(env, env.action_space.low, env.action_space.high)
         env = gym.wrappers.NormalizeObservation(env)
         # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         # no need to set truncations in env.step() as TimeLimit wrapper handles it
-        env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
+        max_steps = kwargs.get("max_steps", None)
+        env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
         return env
 
     return thunk
+
 
 
 class EnvironmentRandomizer:
@@ -75,7 +80,8 @@ class EnvironmentRandomizer:
         # sample x,y inside a spherical region; center, extent from the model file
         azimuth = self.rng.uniform(0, 2*np.pi) 
         elevation = self.rng.uniform(0, np.pi/2)
-        radius = self.rng.uniform(0, self.env.unwrapped.model.stat.extent)
+        # don't let the start/goal be too close to the bounds of the env
+        radius = self.rng.uniform(0, self.env.unwrapped.model.stat.extent - 3.0)
         # extent is radius of the sphere
         x = radius * np.cos(elevation) * np.sin(azimuth)
         y = radius * np.cos(azimuth) * np.cos(elevation)
@@ -92,11 +98,8 @@ class EnvironmentRandomizer:
             self.start_pos = np.array(self.kwargs.get("start_location"))
         else:
             self.start_pos = self.sample_sphere()
-            # init_qpos is the state that the env initializes to when reset() is called
-            self.env.unwrapped.init_qpos[:3] = self.start_pos
-
+            
         self.env.unwrapped.set_start_location(self.start_pos, self.start_orientation, self.start_vel)
-        
 
     def set_goal_state(self, min_distance: float = 1.0) -> None:
         """
@@ -168,9 +171,10 @@ class EnvironmentRandomizer:
             print("Start/goal locations overriden by user - environment bounds will be adjusted accordingly")
             goal_dist_center = np.linalg.norm(np.array(self.kwargs.get("target_location")) - self.env.unwrapped.model.stat.center)
             start_dist_center = np.linalg.norm(np.array(self.kwargs.get("start_location")) - self.env.unwrapped.model.stat.center)
-            self.env_radius_ub = max(goal_dist_center, start_dist_center) + 2.0
+            self.env_radius_ub = max(goal_dist_center, start_dist_center) + 5.0
             print("New env radius ub: ", self.env_radius_ub)
         self.set_env_bounds()
         self.set_initial_state()
         self.set_goal_state()
         self.add_obstacles()
+        self.env.unwrapped.set_env_indicators(self.env.unwrapped.init_qpos[:3], self.env.unwrapped._target_location)

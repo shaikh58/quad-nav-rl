@@ -3,6 +3,7 @@ import gymnasium as gym
 from gymnasium.envs.mujoco import MujocoEnv
 from gymnasium import utils
 from gymnasium.spaces import Box
+import xml.etree.ElementTree as ET
 import os
 
 DEFAULT_CAMERA_CONFIG = {
@@ -36,6 +37,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         target_location: np.ndarray = None, # set by randomizer; user overrides also handled by randomizer
         start_location: np.ndarray = None, # set by randomizer; user overrides also handled by randomizer
         radius: float = None, # set by randomizer; user overrides also handled by randomizer
+        progress_type: str = "straight_line", # "straight_line" or "euclidean"
         **kwargs,
     ):
         self.render_mode = kwargs.get("render_mode", "rgb_array")
@@ -43,6 +45,12 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         if xml_file is None:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             xml_file = os.path.join(current_dir, "..", "models", "skydio_x2", "scene.xml")
+            model_xml_file = os.path.join(current_dir, "..", "models", "skydio_x2", "x2.xml")
+            self.model_xml_file = model_xml_file
+
+        # add geoms to indicate start/goal locations
+        if start_location is not None and target_location is not None and radius is not None:
+            self.set_env_indicators(start_location, target_location)
 
         utils.EzPickle.__init__(
             self,
@@ -83,6 +91,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self._collision_obstacles_weight = collision_obstacles_weight
         self._out_of_bounds_weight = out_of_bounds_weight
         self._success_weight = success_weight
+        self._progress_type = progress_type
         self.start_orientation = np.array([1, 0, 0, 0])
         self.start_vel = np.array([0, 0, 0, 0, 0, 0])
 
@@ -110,6 +119,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             self.set_env_radius(self._radius)
 
     def set_start_location(self, start_location, start_orientation, start_vel):
+        # init_qpos is the state that the env initializes to when reset() is called
         self.init_qpos[:3] = start_location
         # start upright
         self.init_qpos[3:7] = start_orientation
@@ -121,11 +131,25 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
     
     def set_env_radius(self, radius):
         self.model.stat.extent = radius
-
+    
+    def set_env_indicators(self, start_location, target_location):
+        # Parse the XML file
+        tree = ET.parse(self.model_xml_file)
+        root = tree.getroot()
+        
+        # Find and update the spheres
+        for geom in root.iter('geom'):
+            if geom.get('name') == 'green_sphere':
+                geom.set('pos', f"{start_location[0]} {start_location[1]} {start_location[2]}")
+            elif geom.get('name') == 'blue_sphere':
+                geom.set('pos', f"{target_location[0]} {target_location[1]} {target_location[2]}")
+        
+        # Write the modified XML back to disk
+        tree.write(self.model_xml_file, encoding='utf-8', xml_declaration=True)
+    
     def control_cost(self, action):
         control_cost = self._ctrl_cost_weight * np.sum(np.square(action))
         return control_cost
-        
 
     def _get_obs(self):
         position = self.data.qpos.flatten()
@@ -137,21 +161,30 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self.trajectory = trajectory
         self.trajectory_info = info
     
-    def progress(self, trajectory):
-        # for straight line planner, trajectory is just the endpts of planner output
-        pt1 = trajectory[0]
-        pt2 = trajectory[-1]
-        unit_vector = (pt2 - pt1) / np.linalg.norm(pt2 - pt1)
-        progress = np.dot(self.data.qpos[:3] - pt1, unit_vector)
-        progress_prev = np.dot(self.prev_pos - pt1, unit_vector)
-        return progress - progress_prev
+    def progress(self):
+        if self._progress_type == "straight_line":
+            # for straight line planner, trajectory is just the endpts of planner output
+            pt1 = self.trajectory[0]
+            pt2 = self.trajectory[-1]
+            unit_vector = (pt2 - pt1) / np.linalg.norm(pt2 - pt1)
+            progress = np.dot(self.data.qpos[:3] - pt1, unit_vector)
+            progress_prev = np.dot(self.prev_pos - pt1, unit_vector)
+            return progress - progress_prev
+        elif self._progress_type == "euclidean":
+            return np.linalg.norm(self.data.qpos[:3] - self._target_location)
+        else:
+            raise ValueError(f"Invalid progress type: {self._progress_type}")
 
 
     def _compute_reward(self, terminated, msg):
         reward_components = {}
         # progress along planned trajectory; note init_qpos was sampled by RandomEnvGenerator
-        curr_progress = self.progress(self.trajectory)
-        reward_components["progress"] = self._progress_weight * curr_progress
+        curr_progress = self.progress()
+        if self._progress_type == "straight_line":
+            reward_components["progress"] = self._progress_weight * curr_progress
+        elif self._progress_type == "euclidean":
+            # R * (1 - dist_remaining/total_dist); this qty is 0 at start and R at goal
+            reward_components["progress"] = self._progress_weight * (1 - curr_progress / np.linalg.norm(self.init_qpos[:3] - self._target_location))
         # ground collision penalty
         if terminated and msg == "collision_ground":
             reward_components["collision_ground"] = -self._collision_ground_weight
@@ -229,8 +262,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         info["reward"] = reward
         info["reward_components"] = reward_components
         info["termination_msg"] = msg
+        self.info = info # set info to be used in render() - called by RecordVideo wrapper
         # episode length is automatically added by RecordEpisodeStatistics wrapper
-
         if self.render_mode == "human":
             self.render()
 
@@ -274,3 +307,24 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             return True, "out_of_bounds"
 
         return False, "not_terminated"
+
+    def render(self):
+        """
+        Override the parent class render method to add custom logic before rendering.
+        This allows intercepting the render() call from RecordVideo wrapper.
+        """
+        ego_coord = np.round(self.data.qpos[:3], 1)
+        target_coord = np.round(self._target_location, 1)
+        # add current coordinate as an overlay
+        if self.mujoco_renderer.viewer is not None:
+            # set the cam distance again as it was set before env randomizer changes env bounds
+            self.mujoco_renderer.viewer.cam.distance = self.model.stat.extent + 4.0
+            self.mujoco_renderer.viewer._overlays.clear()
+            if self.info['termination_msg'] != "not_terminated":
+                self.mujoco_renderer.viewer.add_overlay(0,f"Agent: {ego_coord}", f"Target: {target_coord}")
+                self.mujoco_renderer.viewer.add_overlay(2, f"{self.info['termination_msg']}","")
+            else:
+                self.mujoco_renderer.viewer.add_overlay(0,f"Agent: {ego_coord}", f"Target: {target_coord}")
+            self.mujoco_renderer.viewer.add_overlay(3, f"Distance to target: {np.round(np.linalg.norm(ego_coord - target_coord), 2)}","") 
+        # Call the parent class's render method
+        return super().render()

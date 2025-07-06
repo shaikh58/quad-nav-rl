@@ -14,13 +14,6 @@ class BasePlanner(ABC):
     """
     
     def __init__(self, **kwargs):
-        """
-        Initialize the planner.
-        
-        Args:
-            env: The environment object containing obstacle and world information
-            **kwargs: Additional planner-specific parameters
-        """
         self._setup_planner(**kwargs)
     
     @abstractmethod
