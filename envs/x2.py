@@ -5,10 +5,9 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 import xml.etree.ElementTree as ET
 import os
+from utils.env_utils import multiply_quaternions
 
-DEFAULT_CAMERA_CONFIG = {
-    "distance": 4.0,
-}
+DEFAULT_CAMERA_CONFIG = {"distance": 4.0}
 
 class QuadNavEnv(MujocoEnv, utils.EzPickle):
     metadata = {
@@ -37,7 +36,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         target_location: np.ndarray = None, # set by randomizer; user overrides also handled by randomizer
         start_location: np.ndarray = None, # set by randomizer; user overrides also handled by randomizer
         radius: float = None, # set by randomizer; user overrides also handled by randomizer
-        progress_type: str = "straight_line", # "straight_line" or "euclidean"
+        progress_type: str = "straight_line", # "straight_line", "euclidean", "negative"
+        reset_noise_scale: float = 5e-2,
         **kwargs,
     ):
         self.render_mode = kwargs.get("render_mode", "rgb_array")
@@ -94,6 +94,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self._progress_type = progress_type
         self.start_orientation = np.array([1, 0, 0, 0])
         self.start_vel = np.array([0, 0, 0, 0, 0, 0])
+        self._reset_noise_scale = reset_noise_scale
 
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
@@ -170,7 +171,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             progress = np.dot(self.data.qpos[:3] - pt1, unit_vector)
             progress_prev = np.dot(self.prev_pos - pt1, unit_vector)
             return progress - progress_prev
-        elif self._progress_type == "euclidean":
+        elif self._progress_type in ["euclidean", "negative"]:
             return np.linalg.norm(self.data.qpos[:3] - self._target_location)
         else:
             raise ValueError(f"Invalid progress type: {self._progress_type}")
@@ -185,6 +186,16 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         elif self._progress_type == "euclidean":
             # R * (1 - dist_remaining/total_dist); this qty is 0 at start and R at goal
             reward_components["progress"] = self._progress_weight * (1 - curr_progress / np.linalg.norm(self.init_qpos[:3] - self._target_location))
+        elif self._progress_type == "negative":
+            reward_components["progress"] = -self._progress_weight * curr_progress
+            if self._check_collision_ground():
+                reward_components["collision_ground"] = -self._collision_ground_weight
+            if self._check_collision_obstacles():
+                reward_components["collision_obstacles"] = -self._collision_obstacles_weight
+            if self._check_oob():
+                reward_components["out_of_bounds"] = -self._out_of_bounds_weight
+
+        # for non-negative rewards, we wait till termination of episodes to penalize
         # ground collision penalty
         if terminated and msg == "collision_ground":
             reward_components["collision_ground"] = -self._collision_ground_weight
@@ -193,7 +204,12 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             reward_components["collision_obstacles"] = -self._collision_obstacles_weight
         # success reward
         if terminated and msg == "success":
-            reward_components["success"] = self._success_weight
+            q = self.data.qpos[3:7]
+            q_conj = np.array([1,0,0,0])
+            q_product = multiply_quaternions(q, q_conj)
+            angle_diff = 2 * np.arccos(np.clip(q_product[0], -1, 1))
+            print(f"Angle diff at success: {angle_diff}")
+            reward_components["success"] = self._success_weight * np.abs(2*np.pi - angle_diff.item())
         # body rate penalty
         body_rate = np.linalg.norm(self.data.qvel[3:6])
         reward_components["body_rate"] = -self._body_rate_weight * body_rate**2
@@ -205,9 +221,20 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
 
     def reset_model(self):
         """Resets the state of the environment and returns an initial observation."""
-        # self.init_qpos comes from parent class 
-        qpos = self.init_qpos
-        qvel = self.init_qvel # initialize at hover
+        noise_low = -self._reset_noise_scale
+        noise_high = self._reset_noise_scale
+
+        # Add noise to position and orientation with different scales
+        qpos = self.init_qpos.copy()
+        qpos[:3] += self.np_random.uniform(
+            low=noise_low, high=noise_high, size=3
+        )
+        qpos[3:7] += self.np_random.uniform(
+            low=noise_low/10, high=noise_high/10, size=4
+        )
+        qvel = self.init_qvel + self.np_random.uniform(
+            low=noise_low/10, high=noise_high/10, size=self.model.nv
+        )
         # set action to hover thrust
         self.data.ctrl = self.hover_thrust
 
@@ -269,42 +296,44 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
 
         # truncation=False as the time limit is handled by the `TimeLimit` wrapper added during `make`
         return observation, reward, terminated, False, info
+
+    def _check_success(self):
+        """Check if quadrotor has reached the goal."""
+        current_pos = self.data.qpos[:3]  # x, y, z position
+        goal_pos = self._target_location
+        
+        # Distance-based success
+        distance = np.linalg.norm(current_pos - goal_pos)
+        return distance < self._goal_threshold  # e.g., 0.1 meters
+
+    def _check_collision_obstacles(self):
+        """Check if quadrotor has collided with an obstacle."""
+        # currently not implemented until CBF is implemented
+        return False
     
+    def _check_collision_ground(self):
+        """Check if quadrotor has collided with the ground."""
+        return self.data.qpos[2] < self._min_height
+    
+    def _check_oob(self):
+        """Check if quadrotor is out of bounds."""
+        return np.linalg.norm(self.data.qpos[:3] - self.model.stat.center) > self.model.stat.extent
+
     def _is_terminated(self):
         """
         Termination conditions
         """
-        def _check_success():
-            """Check if quadrotor has reached the goal."""
-            current_pos = self.data.qpos[:3]  # x, y, z position
-            goal_pos = self._target_location
-            
-            # Distance-based success
-            distance = np.linalg.norm(current_pos - goal_pos)
-            return distance < self._goal_threshold  # e.g., 0.1 meters
-
-        def _check_collision_obstacles():
-            """Check if quadrotor has collided with an obstacle."""
-            # currently not implemented until CBF is implemented
-            return False
-        
-        def _check_collision_ground():
-            """Check if quadrotor has collided with the ground."""
-            return self.data.qpos[2] < self._min_height
-        
-        def _check_oob():
-            """Check if quadrotor is out of bounds."""
-            return np.linalg.norm(self.data.qpos[:3] - self.model.stat.center) > self.model.stat.extent
-
-
-        if _check_success():
+        if self._check_success():
             return True, "success"
-        if _check_collision_obstacles():
-            return True, "collision_obstacles"
-        if _check_collision_ground():
-            return True, "collision_ground"
-        if _check_oob():
-            return True, "out_of_bounds"
+        if self._progress_type != "negative":
+            # for negative only rewards, terminating early can encourage the agent to end episodes early
+            # to prevent accumulating larger negative rewards
+            if self._check_collision_obstacles():
+                return True, "collision_obstacles"
+            if self._check_collision_ground():
+                return True, "collision_ground"
+            if self._check_oob():
+                return True, "out_of_bounds"
 
         return False, "not_terminated"
 

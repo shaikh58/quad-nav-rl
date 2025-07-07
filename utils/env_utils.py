@@ -2,22 +2,20 @@ import numpy as np
 from typing import List, Dict, Tuple
 import gymnasium as gym
 from utils.planner import StraightLinePlanner
-import random
+from gymnasium.wrappers.utils import RunningMeanStd
+from gymnasium.core import ActType, ObsType, WrapperObsType
 
 PLANNER_TYPES = {
     "straight_line": StraightLinePlanner,
 }
 
 
-def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None, planner_type=None, randomize_env=False, **kwargs):
+def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None, planner_type=None, randomize_env=True, mode="train", **kwargs):
     def thunk():
-        random.seed(seed)
-        np.random.seed(seed)
-
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", **kwargs)
             video_path = kwargs.get("video_path", f"videos/{run_name}")
-            env = gym.wrappers.RecordVideo(env, f"{video_path}")
+            env = gym.wrappers.RecordVideo(env, f"{video_path}", episode_trigger=lambda x: x % 200 == 0)
         else:
             env = gym.make(env_id, **kwargs)
         
@@ -30,14 +28,16 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
             planner = PLANNER_TYPES[planner_type]()
             trajectory, info = planner.plan_trajectory(env.unwrapped.init_qpos[:3], env.unwrapped._target_location)
             env.unwrapped.set_trajectory(trajectory, info)
-            
-        env.action_space.seed(seed)
+        # only for action.sample()
+        # env.action_space.seed(seed)
 
         env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
         # env = gym.wrappers.RescaleAction(env, env.action_space.low, env.action_space.high)
-        env = gym.wrappers.NormalizeObservation(env)
+        env = NormalizeObservation(env)
+        # if mode == "eval": 
+        #     env._update_running_mean = False # use calculated stats from training
         # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
@@ -178,3 +178,80 @@ class EnvironmentRandomizer:
         self.set_goal_state()
         self.add_obstacles()
         self.env.unwrapped.set_env_indicators(self.env.unwrapped.init_qpos[:3], self.env.unwrapped._target_location)
+
+
+def multiply_quaternions(q0, q1):
+    """
+    Multiplies two quaternions.
+    Quaternions are represented as lists/tuples [w, x, y, z].
+    """
+    w0, x0, y0, z0 = q0
+    w1, x1, y1, z1 = q1
+
+    w = w0*w1 - x0*x1 - y0*y1 - z0*z1
+    x = w0*x1 + x0*w1 + y0*z1 - z0*y1
+    y = w0*y1 - x0*z1 + y0*w1 + z0*x1
+    z = w0*z1 + x0*y1 - y0*x1 + z0*w1
+
+    return np.array([w, x, y, z])
+
+
+class NormalizeObservation(
+    gym.ObservationWrapper[WrapperObsType, ActType, ObsType],
+    gym.utils.RecordConstructorArgs,
+):
+    """REIMPLEMENTED TO SUPPORT SAVING/LOADING RUNNING STATS FOR EVALUATION
+    Normalizes observations to be centered at the mean with unit variance.
+
+    The property :attr:`update_running_mean` allows to freeze/continue the running mean calculation of the observation
+    statistics. If ``True`` (default), the ``RunningMeanStd`` will get updated every time ``step`` or ``reset`` is called.
+    If ``False``, the calculated statistics are used but not updated anymore; this may be used during evaluation.
+
+    A vector version of the wrapper exists :class:`gymnasium.wrappers.vector.NormalizeObservation`.
+
+    Note:
+        The normalization depends on past trajectories and observations will not be normalized correctly if the wrapper was
+        newly instantiated or the policy was changed recently.
+    """
+
+    def __init__(self, env: gym.Env[ObsType, ActType], epsilon: float = 1e-8):
+        """This wrapper will normalize observations such that each observation is centered with unit variance.
+
+        Args:
+            env (Env): The environment to apply the wrapper
+            epsilon: A stability parameter that is used when scaling the observations.
+        """
+        gym.utils.RecordConstructorArgs.__init__(self, epsilon=epsilon)
+        gym.ObservationWrapper.__init__(self, env)
+
+        assert env.observation_space.shape is not None
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=env.observation_space.shape,
+            dtype=np.float32,
+        )
+
+        self.obs_rms = RunningMeanStd(
+            shape=self.observation_space.shape, dtype=self.observation_space.dtype
+        )
+        self.epsilon = epsilon
+        self._update_running_mean = True
+
+    @property
+    def update_running_mean(self) -> bool:
+        """Property to freeze/continue the running mean calculation of the observation statistics."""
+        return self._update_running_mean
+
+    @update_running_mean.setter
+    def update_running_mean(self, setting: bool):
+        """Sets the property to freeze/continue the running mean calculation of the observation statistics."""
+        self._update_running_mean = setting
+
+    def observation(self, observation: ObsType) -> WrapperObsType:
+        """Normalises the observation using the running mean and variance of the observations."""
+        if self._update_running_mean:
+            self.obs_rms.update(np.array([observation]))
+        return np.float32(
+            (observation - self.obs_rms.mean) / np.sqrt(self.obs_rms.var + self.epsilon)
+        )

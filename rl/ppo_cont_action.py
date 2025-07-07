@@ -94,7 +94,7 @@ class Args:
     """distance to goal for success"""
     adaptive_goal_threshold: bool = False
     """whether to adapt the goal threshold based on the training stage"""
-    progress_type: str = "straight_line"
+    progress_type: str = "euclidean"
     """the type of progress to use"""
     min_height: float = 0.1
     """minimum height above ground before ground collision"""
@@ -118,6 +118,8 @@ class Args:
     """the target location"""
     max_steps: int = 2000
     """the maximum number of steps per episode before truncation"""
+    reset_noise_scale: float = 1e-1
+    """the noise scale for the reset"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -232,9 +234,15 @@ if __name__ == "__main__":
         "target_location": target_location,
         "start_location": start_location,
         "max_steps": args.max_steps,
+        "reset_noise_scale": args.reset_noise_scale,
     } # note the target and start location are set in the env randomizer but can be overridden by the user
-    envs = gym.vector.SyncVectorEnv(# NOTE: the seed is the same for all envs as this gives much better results
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed+i, use_planner=args.use_planner, planner_type=args.planner_type, randomize_env=args.randomize_env, **env_kwargs) for i in range(args.num_envs)]
+    # for negative rewards (w./only positive at goal), we dont want to discount the reward
+    if args.progress_type == "negative": 
+        args.gamma = 1
+    # NOTE: the seed is the same for all envs to ensure same start/goal locations chosen by randomizer
+    # the seed will only be args.seed+i for goal conditioned RL
+    envs = gym.vector.SyncVectorEnv(
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type, randomize_env=args.randomize_env, **env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -252,8 +260,7 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset()
-    # envs.action_space.seed()
+    next_obs, _ = envs.reset(seed=[args.seed+i for i in range(args.num_envs)])
     for i, env in enumerate(envs.envs): 
         print(f"Env: {i}", "Start: ", env.unwrapped.init_qpos[:3], "Target: ", env.unwrapped._target_location, 
         "Env radius: ", env.unwrapped.model.stat.extent, 
@@ -291,7 +298,7 @@ if __name__ == "__main__":
                 for k in range(args.num_envs):
                     if truncations[k] or terminations[k]:
                         if infos["termination_msg"][k] == "success":
-                            print("Success!!!", "Start agent pos: ", envs.envs[k].unwrapped.init_qpos[:3], "End agent pos: ", infos["pos"][k], "Target pos: ", envs.envs[k].unwrapped._target_location)
+                            print("Success!!!", "End agent pos: ", infos["pos"][k], "Target pos: ", envs.envs[k].unwrapped._target_location)
                         # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
                         if "episode" in infos:
                             writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
@@ -427,24 +434,22 @@ if __name__ == "__main__":
         env_kwargs["start_location"] = start_location
         env_kwargs["target_location"] = target_location
         env_kwargs["radius"] = radius
-        # make the goal threshold larger to make the task easier
-        env_kwargs["goal_threshold"] = args.goal_threshold * 1.5
+        env_kwargs["goal_threshold"] = args.goal_threshold
 
         n_episodes = 10
 
         # custom eval using exact same env as env of rank 0 (this is the env that has video capture during training)
-        envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference
+        envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference; even though its True, it uses passed in start/goal
         [make_env(args.env_id, 0, False, 
         run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type,  
-        randomize_env=False, **env_kwargs
+        randomize_env=True, mode="eval", **env_kwargs
         ) for i in range(1)]
         )
+        obs, _ = envs.reset(seed=args.seed)
         # reset the env to set the start/goal pos according to randomizer
         for i in range(n_episodes):
             video = []
             over = False
-            # reset the env to set the start/goal pos according to randomizer
-            obs, _ = envs.reset()
             while not over:
                 with torch.no_grad():
                     action = agent.actor_mean(torch.tensor(obs)) # deterministic action during inference
@@ -454,7 +459,7 @@ if __name__ == "__main__":
                 over = terminated or truncated
             os.makedirs(video_path, exist_ok=True)
             imageio.mimsave(f"{video_path}/ep_{i}.mp4", np.array(video).squeeze(), fps=30)
-
+            obs, _ = envs.reset() # don't call with seed again as it changes rng state
         envs.close()
 
         if args.upload_model:
