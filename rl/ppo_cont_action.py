@@ -80,8 +80,6 @@ class Args:
     """the target KL divergence threshold"""
 
     # environment specific arguments
-    randomize_env: bool = True
-    """whether to randomize the environment"""
     use_planner: bool = True
     """whether to use a planner"""
     planner_type: str = "straight_line"
@@ -235,6 +233,8 @@ if __name__ == "__main__":
         "start_location": start_location,
         "max_steps": args.max_steps,
         "reset_noise_scale": args.reset_noise_scale,
+        "save_path": f"runs/{run_name}",
+        "mode": "train"
     } # note the target and start location are set in the env randomizer but can be overridden by the user
     # for negative rewards (w./only positive at goal), we dont want to discount the reward
     if args.progress_type == "negative": 
@@ -242,7 +242,7 @@ if __name__ == "__main__":
     # NOTE: the seed is the same for all envs to ensure same start/goal locations chosen by randomizer
     # the seed will only be args.seed+i for goal conditioned RL
     envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type, randomize_env=args.randomize_env, **env_kwargs) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type, **env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -435,6 +435,7 @@ if __name__ == "__main__":
         env_kwargs["target_location"] = target_location
         env_kwargs["radius"] = radius
         env_kwargs["goal_threshold"] = args.goal_threshold
+        env_kwargs["mode"] = "eval"
 
         n_episodes = 10
 
@@ -442,7 +443,7 @@ if __name__ == "__main__":
         envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference; even though its True, it uses passed in start/goal
         [make_env(args.env_id, 0, False, 
         run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type,  
-        randomize_env=True, mode="eval", **env_kwargs
+        randomize_env=True, **env_kwargs
         ) for i in range(1)]
         )
         obs, _ = envs.reset(seed=args.seed)

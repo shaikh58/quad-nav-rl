@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from typing import List, Dict, Tuple
 import gymnasium as gym
 from utils.planner import StraightLinePlanner
@@ -10,20 +11,18 @@ PLANNER_TYPES = {
 }
 
 
-def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None, planner_type=None, randomize_env=True, mode="train", **kwargs):
+def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None, planner_type=None, **kwargs):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", **kwargs)
             video_path = kwargs.get("video_path", f"videos/{run_name}")
-            env = gym.wrappers.RecordVideo(env, f"{video_path}", episode_trigger=lambda x: x % 200 == 0)
+            env = gym.wrappers.RecordVideo(env, f"{video_path}", episode_trigger=lambda x: x % 300 == 0)
         else:
             env = gym.make(env_id, **kwargs)
         
-        # randomly modify the environment; create the object inside for lazy env creation for vectorized envs
-        if randomize_env:
-            env_randomizer = EnvironmentRandomizer(env, seed=seed, **kwargs)
-            env_randomizer.generate_env()
-
+        # modify the env w./ user-provided, or random, start/goal/obstacles
+        env_customizer = EnvironmentCustomizer(env, seed=seed, **kwargs)
+        env_customizer.generate_env()
         if use_planner:
             planner = PLANNER_TYPES[planner_type]()
             trajectory, info = planner.plan_trajectory(env.unwrapped.init_qpos[:3], env.unwrapped._target_location)
@@ -35,9 +34,9 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
         env = gym.wrappers.RecordEpisodeStatistics(env)
         env = gym.wrappers.ClipAction(env)
         # env = gym.wrappers.RescaleAction(env, env.action_space.low, env.action_space.high)
-        env = NormalizeObservation(env)
-        # if mode == "eval": 
-        #     env._update_running_mean = False # use calculated stats from training
+        save_path = kwargs.get("save_path", None)
+        mode = kwargs.get("mode", None)
+        env = NormalizeObservation(env, mode=mode, save_path=save_path)
         # env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
@@ -50,7 +49,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
 
 
 
-class EnvironmentRandomizer:
+class EnvironmentCustomizer:
     """
     Random environment generator for MuJoCo-based gym environments.
     
@@ -214,7 +213,7 @@ class NormalizeObservation(
         newly instantiated or the policy was changed recently.
     """
 
-    def __init__(self, env: gym.Env[ObsType, ActType], epsilon: float = 1e-8):
+    def __init__(self, env: gym.Env[ObsType, ActType], mode: str, save_path: str = None, epsilon: float = 1e-8):
         """This wrapper will normalize observations such that each observation is centered with unit variance.
 
         Args:
@@ -236,7 +235,10 @@ class NormalizeObservation(
             shape=self.observation_space.shape, dtype=self.observation_space.dtype
         )
         self.epsilon = epsilon
-        self._update_running_mean = True
+        self._update_running_mean = mode == "train"
+        self.save_path = save_path
+        if mode == "eval":
+            self.load_obs_rms()
 
     @property
     def update_running_mean(self) -> bool:
@@ -247,11 +249,21 @@ class NormalizeObservation(
     def update_running_mean(self, setting: bool):
         """Sets the property to freeze/continue the running mean calculation of the observation statistics."""
         self._update_running_mean = setting
+    
+    def load_obs_rms(self) -> None:
+        if self.save_path is not None:
+            data = np.load(os.path.join(self.save_path, "obs_rms.npz"))
+            self.obs_rms.mean = data["mean"]
+            self.obs_rms.var = data["var"]
+            self.epsilon = data["epsilon"]
 
     def observation(self, observation: ObsType) -> WrapperObsType:
         """Normalises the observation using the running mean and variance of the observations."""
         if self._update_running_mean:
             self.obs_rms.update(np.array([observation]))
+            if self.save_path is not None:
+                np.savez(os.path.join(self.save_path, "obs_rms.npz"), mean=self.obs_rms.mean, var=self.obs_rms.var, epsilon=self.epsilon)
+        
         return np.float32(
             (observation - self.obs_rms.mean) / np.sqrt(self.obs_rms.var + self.epsilon)
         )

@@ -208,7 +208,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             q_conj = np.array([1,0,0,0])
             q_product = multiply_quaternions(q, q_conj)
             angle_diff = 2 * np.arccos(np.clip(q_product[0], -1, 1))
-            print(f"Angle diff at success: {angle_diff}")
+            # print(f"Angle diff at success: {angle_diff}")
             reward_components["success"] = self._success_weight * np.abs(2*np.pi - angle_diff.item())
         # body rate penalty
         body_rate = np.linalg.norm(self.data.qvel[3:6])
