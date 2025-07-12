@@ -118,6 +118,12 @@ class Args:
     """the maximum number of steps per episode before truncation"""
     reset_noise_scale: float = 1e-1
     """the noise scale for the reset"""
+    use_obstacles: bool = False
+    """whether to use obstacles"""
+    regen_obstacles: bool = False
+    """whether to regenerate obstacles at the end of each episode (w.p. obs_regen_eps)"""
+    obs_regen_eps: float = 0.8
+    """the probability with which to regenerate obstacles"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -234,7 +240,10 @@ if __name__ == "__main__":
         "max_steps": args.max_steps,
         "reset_noise_scale": args.reset_noise_scale,
         "save_path": f"runs/{run_name}",
-        "mode": "train"
+        "mode": "train",
+        "use_obstacles": args.use_obstacles,
+        "regen_obstacles": args.regen_obstacles,
+        "obs_regen_eps": args.obs_regen_eps,
     } # note the target and start location are set in the env randomizer but can be overridden by the user
     # for negative rewards (w./only positive at goal), we dont want to discount the reward
     if args.progress_type == "negative": 

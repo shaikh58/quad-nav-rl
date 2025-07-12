@@ -165,7 +165,6 @@ def train(config=None):
                 # upon episode completion, vectorEnv handles resets automatically
                 for k in range(config.num_envs):
                     if truncations[k] or terminations[k]:
-                        print(f"global_step={global_step}")
                         if "episode" in infos:
                             wandb.log({"episodic_return": infos["episode"]["r"][k], "episodic_length": infos["episode"]["l"][k]})
                             ep_ret = infos["episode"]["r"][k]
