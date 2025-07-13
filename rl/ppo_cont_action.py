@@ -50,7 +50,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 3
+    num_envs: int = 1
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -452,7 +452,7 @@ if __name__ == "__main__":
         envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference; even though its True, it uses passed in start/goal
         [make_env(args.env_id, 0, False, 
         run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type,  
-        randomize_env=True, **env_kwargs
+         **env_kwargs
         ) for i in range(1)]
         )
         obs, _ = envs.reset(seed=args.seed)
