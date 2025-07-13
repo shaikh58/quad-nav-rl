@@ -8,8 +8,10 @@ import os
 from utils.env_utils import multiply_quaternions
 import mujoco
 from utils.env_config_generator import EnvironmentConfigGenerator
+from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 
 DEFAULT_CAMERA_CONFIG = {"distance": 4.0}
+DEFAULT_SIZE = 480
 
 class QuadNavEnv(MujocoEnv, utils.EzPickle):
     metadata = {
@@ -48,30 +50,72 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
 
         if xml_file is None:
             current_dir = os.path.dirname(os.path.abspath(__file__))
-            xml_file = os.path.join(current_dir, "..", "models", "skydio_x2", "scene.xml")
-            model_xml_file = os.path.join(current_dir, "..", "models", "skydio_x2", "x2.xml")
+            self.xml_file = os.path.join(current_dir, "..", "models", "skydio_x2", "scene.xml")
+            self.model_xml_file = os.path.join(current_dir, "..", "models", "skydio_x2", "x2.xml")
 
-        # utils.EzPickle.__init__(
-        #     self,
-        #     xml_file,
-        #     frame_skip,
-        #     default_camera_config,
-        #     ctrl_cost_weight,
-        #     progress_weight,
-        #     body_rate_weight,
-        #     collision_ground_weight,
-        #     collision_obstacles_weight,
-        #     out_of_bounds_weight,
-        #     success_weight,
-        #     **kwargs,
-        # )
-
-        super().__init__(
+        utils.EzPickle.__init__(
+            self,
             xml_file,
             frame_skip,
-            observation_space=None,
-            default_camera_config=default_camera_config,
-            render_mode=self.render_mode,
+            default_camera_config,
+            ctrl_cost_weight,
+            progress_weight,
+            body_rate_weight,
+            collision_ground_weight,
+            collision_obstacles_weight,
+            out_of_bounds_weight,
+            success_weight,
+            **kwargs,
+        )
+        # generate env configs
+        self._config_generator = config_generator
+        env_config = self._config_generator.generate_env_config()
+        self._start_location = env_config["start_location"]
+        self._target_location = env_config["target_location"]
+        self._radius = env_config["radius"]
+
+        # setup Mujoco model; mjSpec is the new API for procedurally modifying a model
+        self.width = DEFAULT_SIZE
+        self.height = DEFAULT_SIZE
+        self.mj_spec = mujoco.MjSpec.from_file(self.xml_file)
+        self.x2_body_ix = [i for i, body in enumerate(self.mj_spec.bodies) if body.name == 'x2'][0]
+        self.model = self.mj_spec.compile()
+        # MjrContext will copy model.vis.global_.off* to con.off*
+        self.model.vis.global_.offwidth = self.width
+        self.model.vis.global_.offheight = self.height
+        self.data = mujoco.MjData(self.model)
+
+        self._use_obstacles = use_obstacles
+        if self._use_obstacles:
+            # generate obstacles at the beginning; possibly regenerate after each episode
+            obstacle_metadata = self._config_generator.add_obstacles(self._start_location, self._target_location)
+            self.generate_obstacle_geoms(obstacle_metadata)
+            self.model, self.data = self.mj_spec.recompile(self.model, self.data)
+
+        # the default start state is overwritten in reset_model()
+        self.init_qpos = self.data.qpos.ravel().copy()
+        self.init_qvel = self.data.qvel.ravel().copy()
+        self.frame_skip = frame_skip
+        if "render_fps" in self.metadata:
+            assert (
+                int(np.round(1.0 / self.dt)) == self.metadata["render_fps"]
+            ), f'Expected value: {int(np.round(1.0 / self.dt))}, Actual value: {self.metadata["render_fps"]}'
+
+        self._set_action_space()
+        self.camera_name = None
+        self.camera_id = None
+        self.max_geom=1000
+        self.visual_options={}
+        self.mujoco_renderer = MujocoRenderer(
+            self.model,
+            self.data,
+            default_camera_config,
+            self.width,
+            self.height,
+            self.max_geom,
+            self.camera_id,
+            self.camera_name,
+            self.visual_options,
         )
         # distance threshold to target location for success
         self._goal_threshold = goal_threshold
@@ -92,10 +136,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self.start_vel = np.array([0, 0, 0, 0, 0, 0])
         self._reset_noise_scale = reset_noise_scale
         self._mode = mode
-        self._config_generator = config_generator
         self._obs_regen_eps = obs_regen_eps
         self._regen_obstacles = regen_obstacles
-        self._use_obstacles = use_obstacles
 
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
@@ -107,18 +149,10 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
         )
         self.trajectory = None
-        self.prev_pos = self.data.qpos[:3].copy()
-        env_config = self._config_generator.generate_env_config()
-        self._start_location = env_config["start_location"]
-        self._target_location = env_config["target_location"]
-        self._radius = env_config["radius"]
+        # TODO: maybe this should just be done in reset()
         self.set_start_location() 
         self.set_start_goal_geoms()
         self.set_env_radius()
-        if self._use_obstacles:
-            # generate obstacles at the beginning; possibly regenerate after each episode
-            obstacle_metadata = self._config_generator.add_obstacles()
-            self.generate_obstacle_geoms(obstacle_metadata)
 
     def clear_obstacle_geoms(self):
         for i in range(self.model.ngeom):
@@ -127,19 +161,21 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                 self.model.geom_type[i] = mujoco.mjtGeom.mjGEOM_NONE
 
     def generate_obstacle_geoms(self, obstacle_metadata):
-        return
-        
-    #     for obstacle in enumerate(obstacle_metadata):
-    #         # create the geoms
-
-    #         # fill in the geom attributes
-    #         self.model.geom_pos[] = obstacle["position"]
-    #         self.model.geom_size[] = obstacle["radius"]
-    #         self.model.geom_rgba[] = [0,0,1,1] # all obstacles are blue
-    #         if obstacle["type"] == "sphere":
-    #             self.model.geom_type[] = mujoco.mjtGeom.mjGEOM_SPHERE
-    #         else:
-    #             raise ValueError(f"Invalid obstacle type: {obstacle['type']}")
+        for i, obstacle in enumerate(obstacle_metadata):
+            name = obstacle["name"]
+            pos = obstacle["position"]
+            radius = obstacle["radius"]
+            obs_type = obstacle["type"]
+            if obs_type == "sphere":
+                obs_type = mujoco.mjtGeom.mjGEOM_SPHERE
+            else:
+                raise ValueError(f"Invalid obstacle type: {obs_type}")
+            self.mj_spec.worldbody.add_geom(name=name,
+                            type=obs_type,
+                            rgba=[0, 0, 1, 1], # all obstacles are blue
+                            pos=pos,
+                            size=[radius, radius, 0])
+        print(f"Added {len(obstacle_metadata)} obstacles")
 
     def set_start_location(self):
         # init_qpos is the state that the env initializes to when reset() is called
@@ -219,7 +255,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             q_conj = np.array([1,0,0,0])
             q_product = multiply_quaternions(q, q_conj)
             angle_diff = 2 * np.arccos(np.clip(q_product[0], -1, 1))
-            # print(f"Angle diff at success: {angle_diff}")
+            print(f"Angle diff at success: {angle_diff}")
             reward_components["success"] = self._success_weight * np.abs(2*np.pi - angle_diff.item())
         # body rate penalty
         body_rate = np.linalg.norm(self.data.qvel[3:6])
@@ -229,8 +265,55 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             reward_components["out_of_bounds"] = -self._out_of_bounds_weight
         return reward_components
 
+    def reset(
+    self,
+    *,
+    seed: int | None = None,
+    options: dict | None = None,):
+        # # create a new spec, model, data, and initialize the env each episode
+        # self.mj_spec = mujoco.MjSpec.from_file(self.xml_file)
+        # #### TODO: test spec
+        # if "magenta_sphere" not in [geom.name for geom in self.mj_spec.geoms]:
+        #     self.mj_spec.worldbody.add_geom(name='magenta_sphere',
+        #                     type=mujoco.mjtGeom.mjGEOM_SPHERE,
+        #                     rgba=[1, 0, 1, 1],
+        #                     pos=[-2.7, 8.5, 1.5],
+        #                     size=[.05, .05, 0])
+        #     self.model, self.data = self.mj_spec.recompile(self.model, self.data)
+        #     # print(self.model.geom_pos)
+        #     # print([geom.name for geom in self.mj_spec.geoms])
+        # self.init_qpos = self.data.qpos.ravel().copy()
+        # self.init_qvel = self.data.qvel.ravel().copy()
+        # self.set_start_location() 
+        # self.set_start_goal_geoms()
+        # self.set_env_radius()
+        # if self._use_obstacles:
+        #     # generate obstacles at the beginning; possibly regenerate after each episode
+        #     obstacle_metadata = self._config_generator.add_obstacles()
+        #     self.generate_obstacle_geoms(obstacle_metadata)
+        # self.mujoco_renderer = MujocoRenderer(
+        #     self.model,
+        #     self.data,
+        #     DEFAULT_CAMERA_CONFIG,
+        #     self.width,
+        #     self.height,
+        #     self.max_geom,
+        #     self.camera_id,
+        #     self.camera_name,
+        #     self.visual_options,
+        # )
+
+        mujoco.mj_resetData(self.model, self.data)
+        ob = self.reset_model()
+        info = self._get_reset_info()
+
+        if self.render_mode == "human":
+            self.render()
+        return ob, info
+
     def reset_model(self):
         """Resets the state of the environment and returns an initial observation."""
+
         noise_low = -self._reset_noise_scale
         noise_high = self._reset_noise_scale
         # Add noise to position and orientation with different scales
@@ -252,8 +335,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         # data.qvel to avoid pointer issues in underlying c++
         self.set_state(qpos, qvel) 
         observation = self._get_obs()
-        # # initialize previous pos to current pos
-        # self.prev_pos = self.data.qpos[:3].copy()
+        # initialize previous pos to current pos
+        self.prev_pos = qpos[:3].copy()
 
         # w.p. eps, regenerate obstacles
         if self._use_obstacles and self._regen_obstacles and \

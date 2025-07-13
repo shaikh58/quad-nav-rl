@@ -74,37 +74,35 @@ class EnvironmentConfigGenerator:
         """Sample obstacle parameters from uniform distributions."""
         params = {}
         params["num_obstacles"] = self.rng.integers(
-            self.kwargs.get("obstacle_count_lb", 3),
-            self.kwargs.get("obstacle_count_ub", 8) + 1
+            self.kwargs.get("obstacle_count_lb", 1),
+            self.kwargs.get("obstacle_count_ub", 5) + 1
         )
-        params["min_radius"] = self.rng.uniform(
-            self.kwargs.get("obstacle_radius_lb", 0.2),
-            self.kwargs.get("obstacle_radius_ub", 0.8)
-        )
-        params["max_radius"] = self.rng.uniform(
-            params["min_radius"],
-            self.kwargs.get("obstacle_radius_ub", 1.5)
-        )
+        params["min_radius"] = 0.05
+        params["max_radius"] = 0.5
         return params
 
-    def add_obstacles(self) -> List[Dict]:
+    def add_obstacles(self, start_location: np.ndarray, target_location: np.ndarray) -> List[Dict]:
         """Generate obstacles configuration."""
         obstacles = []
         params = self.sample_obstacle_params()
         for i in range(params["num_obstacles"]):
-            azimuth = self.rng.uniform(0, 2*np.pi)
-            elevation = self.rng.uniform(0, np.pi/2)  # Keep obstacles in upper hemisphere
-            distance = self.rng.uniform(params["min_distance"], params["max_distance"])
-
-            x = distance * np.cos(elevation) * np.sin(azimuth)
-            y = distance * np.cos(azimuth) * np.cos(elevation)
-            z = distance * np.sin(elevation)
+            # azimuth = self.rng.uniform(0, 2*np.pi)
+            # elevation = self.rng.uniform(0, np.pi/2)  # Keep obstacles in upper hemisphere
+            # place the obstacle between start and target
+            dir_vec = target_location - start_location
+            dir_vec = dir_vec / np.linalg.norm(dir_vec)
+            distance = self.rng.uniform(0,1) * np.linalg.norm(target_location - start_location)
+            # project the obstacle onto the line between start and target
+            obstacle_pos = start_location + distance * dir_vec
+            # x = distance * np.cos(elevation) * np.sin(azimuth)
+            # y = distance * np.cos(azimuth) * np.cos(elevation)
+            # z = distance * np.sin(elevation)
             radius = self.rng.uniform(params["min_radius"], params["max_radius"])
             
             obstacle_config = {
                 "name": f"obstacle_{i}",
                 "type": "sphere",
-                "position": [x, y, z],
+                "position": [obstacle_pos[0], obstacle_pos[1], obstacle_pos[2]],
                 "radius": radius
             }
             

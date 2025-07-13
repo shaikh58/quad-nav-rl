@@ -446,7 +446,7 @@ if __name__ == "__main__":
         env_kwargs["goal_threshold"] = args.goal_threshold
         env_kwargs["mode"] = "eval"
 
-        n_episodes = 10
+        n_episodes = 5
 
         # custom eval using exact same env as env of rank 0 (this is the env that has video capture during training)
         envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference; even though its True, it uses passed in start/goal
@@ -460,12 +460,14 @@ if __name__ == "__main__":
         for i in range(n_episodes):
             video = []
             over = False
-            while not over:
+            iters = 0
+            while not over and iters < 1000: # manual termination to prevent infinite loop
                 with torch.no_grad():
                     action = agent.actor_mean(torch.tensor(obs)) # deterministic action during inference
                 obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
                 rgb_array = envs.render()
                 video.append(rgb_array)
+                iters += 1
                 over = terminated or truncated
             os.makedirs(video_path, exist_ok=True)
             imageio.mimsave(f"{video_path}/ep_{i}.mp4", np.array(video).squeeze(), fps=30)
