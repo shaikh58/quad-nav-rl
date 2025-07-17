@@ -75,10 +75,10 @@ class EnvironmentConfigGenerator:
         params = {}
         params["num_obstacles"] = self.rng.integers(
             self.kwargs.get("obstacle_count_lb", 1),
-            self.kwargs.get("obstacle_count_ub", 5) + 1
+            self.kwargs.get("obstacle_count_ub", 3) + 1
         )
         params["min_radius"] = 0.05
-        params["max_radius"] = 0.5
+        params["max_radius"] = 0.1
         return params
 
     def add_obstacles(self, start_location: np.ndarray, target_location: np.ndarray) -> List[Dict]:

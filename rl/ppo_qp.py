@@ -16,7 +16,8 @@ from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 from utils.env_utils import make_env
 import envs
-
+from qpth.qp import QPFunction
+from utils.utils import grad_sdf, sdf
 
 @dataclass
 class Args:
@@ -148,6 +149,31 @@ def set_global_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 
+class QP(nn.Module):
+    def __init__(self, dim=4, nineq=1, neq=0, eps=1e-4):
+        super().__init__()
+        self.nineq = nineq
+        self.neq = neq
+        self.eps = eps
+        self.dim = dim
+        self.envs = envs
+        self.M = torch.tril(torch.ones(dim, dim))
+        self.L = torch.nn.Parameter(torch.tril(torch.rand(dim, dim)))
+        self.G = torch.nn.Parameter(torch.Tensor(nineq,dim).uniform_(-1,1))
+        self.z0 = torch.nn.Parameter(torch.zeros(dim)) # TODO: possibly make this a learnable parameter
+        self.s0 = torch.nn.Parameter(torch.ones(nineq)) # learnable slack variable
+        
+    def cbf(self, x):
+
+    def forward(self, x):
+        L = self.M*self.L # enforce lower triangular
+        Q = L.mm(L.t()) + self.eps*torch.eye(self.dim)
+        # h = self.G.mv(self.z0)+self.s0 # TODO: possibly use this formulation
+        h = self.s0
+        e = torch.Tensor() # empty placeholder since no equality constraints
+        x = QPFunction(verbose=False)(Q, x, self.G, h, e, e)
+        return x
+
 
 class Agent(nn.Module):
     def __init__(self, envs):
@@ -159,17 +185,15 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
-        )
+        self.cbf_qp = QP(dim=4, nineq=1, neq=0, eps=1e-4)
+        self.actor_input_layer = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
+        self.tanh_activation = nn.Tanh()
+        self.actor_hidden_layer = layer_init(nn.Linear(64, 64))
+        self.actor_final_layer = layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01)
         # Initialize final layer bias to output hover thrust
         with torch.no_grad():
             # no action scaling
-            self.actor_mean[-1].bias.fill_(envs.envs[0].unwrapped.model.keyframe('hover').ctrl[0])
+            self.actor_final_layer.bias.fill_(envs.envs[0].unwrapped.model.keyframe('hover').ctrl[0])
             # with action scaling - makes it worse
             # hover_thrust = envs.envs[0].unwrapped.model.keyframe('hover').ctrl[0]
             # # scale to [-1,1]
@@ -180,8 +204,13 @@ class Agent(nn.Module):
     def get_value(self, x):
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
-        action_mean = self.actor_mean(x)
+    def get_action_and_value(self, x, sdfs, grads, action=None):
+        # action_mean = self.actor_mean(x) # lines below split out the layers of this module to insert the QP
+        x = self.actor_input_layer(x)
+        x = self.tanh_activation(x)
+
+        
+
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -269,13 +298,15 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=[args.seed+i for i in range(args.num_envs)])
+    next_obs, infos = envs.reset(seed=[args.seed+i for i in range(args.num_envs)])
     for i, env in enumerate(envs.envs): 
         print(f"Env: {i}", "Start: ", env.unwrapped.init_qpos[:3], "Target: ", env.unwrapped._target_location, 
         "Env radius: ", env.unwrapped.model.stat.extent, 
         "Distance from center: ", np.linalg.norm(env.unwrapped.init_qpos[:3] - env.unwrapped.model.stat.center),
         "Target distance from center: ", np.linalg.norm(env.unwrapped._target_location - env.unwrapped.model.stat.center))
     next_obs = torch.Tensor(next_obs).to(device)
+    sdfs = torch.Tensor(infos["sdf"]).to(device)
+    grads = torch.Tensor(infos["grad"]).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     try:
         for iteration in range(1, args.num_iterations + 1):
@@ -292,13 +323,15 @@ if __name__ == "__main__":
 
                 # ALGO LOGIC: action logic
                 with torch.no_grad():
-                    action, logprob, _, value = agent.get_action_and_value(next_obs)
+                    action, logprob, _, value = agent.get_action_and_value(next_obs, sdfs, grads)
                     values[step] = value.flatten()
                 actions[step] = action
                 logprobs[step] = logprob
 
                 # TRY NOT TO MODIFY: execute the game and log data.
                 next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+                sdfs = torch.Tensor(infos["sdf"]).to(device)
+                grads = torch.Tensor(infos["grad"]).to(device)
                 next_done = np.logical_or(terminations, truncations)
                 rewards[step] = torch.tensor(reward).to(device).view(-1)
                 next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
