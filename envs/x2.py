@@ -217,7 +217,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         closest_obs_ix = np.argmin(dists_to_obstacles)
         sdf = dists_to_obstacles[closest_obs_ix]
         # compute sdf and gradient together to avoid relying on data in env state
-        grad = grad_sdf(self.data.qpos, self.obstacle_metadata[closest_obs_ix]["position"])
+        state = np.concatenate((self.data.qpos, self.data.qvel))
+        grad = grad_sdf(state, self.obstacle_metadata[closest_obs_ix]["position"])
         return sdf, grad
     
     def control_cost(self, action):

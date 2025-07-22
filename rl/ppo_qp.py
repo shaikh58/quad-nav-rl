@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.env_utils import make_env
 import envs
 from qpth.qp import QPFunction
-from utils.utils import grad_sdf, sdf
+from utils import utils
 
 @dataclass
 class Args:
@@ -150,28 +150,55 @@ def set_global_seed(seed):
     torch.backends.cudnn.benchmark = True
 
 class QP(nn.Module):
-    def __init__(self, dim=4, nineq=1, neq=0, eps=1e-4):
+    def __init__(self, dim, nineq, neq, eps=1e-4, envs=None):
+        """More details available at https://locuslab.github.io/qpth/"""
         super().__init__()
+        self.envs = envs
         self.nineq = nineq
         self.neq = neq
         self.eps = eps
         self.dim = dim
-        self.envs = envs
         self.M = torch.tril(torch.ones(dim, dim))
         self.L = torch.nn.Parameter(torch.tril(torch.rand(dim, dim)))
-        self.G = torch.nn.Parameter(torch.Tensor(nineq,dim).uniform_(-1,1))
+        # G (nineq, dim) is the CBF constraint so should not be learned
+        # self.G = torch.Tensor(nineq,dim, requires_grad=False)
         self.z0 = torch.nn.Parameter(torch.zeros(dim)) # TODO: possibly make this a learnable parameter
         self.s0 = torch.nn.Parameter(torch.ones(nineq)) # learnable slack variable
-        
-    def cbf(self, x):
+        self.alpha = 1 # CBF tuning parameter; extended class K function
+        self.inertia, self.inv_inertia = utils.get_inertia(envs)
 
-    def forward(self, x):
+
+    def forward(self, x, u_rl, sdfs, grads):
+        """Solve QP: argmin_z 1/2 z^T Q z + p^T z
+                        subject to Gz <= h
+                                    Az  = b
+        where z is the compensation control to be determined.
+        sdf, grad_sdf is evaluated at x for EACH environment i.e. x is 
+        batch of states. But NOTE: the state is not used in in the QP as its indirectly 
+        used to compute the sdf and grad_sdf.
+        x: (n_envs, state_dim)
+        u_rl: (n_envs, action_dim)
+        sdfs: (n_envs, 1)
+        grads: (n_envs, state_dim)
+        """
+        # f is batched (n_envs, state_dim)
+        f = utils.f(x, gravity=np.abs(self.envs.envs[0].unwrapped.model.opt.gravity[-1]), 
+                    inertia=self.inertia, inv_inertia=self.inv_inertia).to(x.device)
+        g = utils.g(x).to(x.device) # batched (n_envs, state_dim, state_dim)
+        self.G = -torch.mm(grads, g) # sign flipped to get CBF into QP canonical form
+        self.G = torch.as_tensor(self.G, requires_grad=False) # again, don't learn G
         L = self.M*self.L # enforce lower triangular
         Q = L.mm(L.t()) + self.eps*torch.eye(self.dim)
-        # h = self.G.mv(self.z0)+self.s0 # TODO: possibly use this formulation
-        h = self.s0
+        # h = self.G.mv(self.z0)+self.s0 # TODO: qpth recommends this initialization
+        # CBF formulation RHS is expanded to isolate the RL control from the optimization variable u
+        # and get the inequality in canonical form Gz <= h
+        # NOTE: sign is +ve since QP canonical form uses less than for inequality constraints
+        # h is batched (n_envs, 1)
+        # TODO: fix the dimensions of the args of h esp the last term
+        h = self.s0 + self.alpha * sdfs + torch.mm(grads, f) + torch.mm(grads, torch.bmm(g, u_rl))
         e = torch.Tensor() # empty placeholder since no equality constraints
-        x = QPFunction(verbose=False)(Q, x, self.G, h, e, e)
+        p = torch.zeros(self.dim, requires_grad=False)
+        x = QPFunction(verbose=False)(Q, p, self.G, h, e, e)
         return x
 
 
@@ -185,11 +212,17 @@ class Agent(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0),
         )
-        self.cbf_qp = QP(dim=4, nineq=1, neq=0, eps=1e-4)
-        self.actor_input_layer = layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64))
-        self.tanh_activation = nn.Tanh()
-        self.actor_hidden_layer = layer_init(nn.Linear(64, 64))
-        self.actor_final_layer = layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01)
+
+        self.cbf_qp = QP(dim=np.array(envs.single_observation_space.shape).prod(),
+                         nineq=1, neq=0, eps=1e-4, envs=envs)
+
+        self.actor_mean = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+        )
         # Initialize final layer bias to output hover thrust
         with torch.no_grad():
             # no action scaling
@@ -205,18 +238,17 @@ class Agent(nn.Module):
         return self.critic(x)
 
     def get_action_and_value(self, x, sdfs, grads, action=None):
-        # action_mean = self.actor_mean(x) # lines below split out the layers of this module to insert the QP
-        x = self.actor_input_layer(x)
-        x = self.tanh_activation(x)
-
-        
-
+        action_mean = self.actor_mean(x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+        # once the RL control is computed, we pass it through the safety compensator
+        u_safe = self.cbf_qp(x, action, sdfs, grads)
+        u_out = action_mean + u_safe
+        # TODO: figure out how the log_prob changes because this is used to compute the policy loss! and returns?
+        return u_out, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 
 if __name__ == "__main__":
@@ -378,6 +410,8 @@ if __name__ == "__main__":
             b_advantages = advantages.reshape(-1)
             b_returns = returns.reshape(-1)
             b_values = values.reshape(-1)
+            b_sdfs = sdfs.reshape(-1)
+            b_grads = grads.reshape((-1,) + envs.single_observation_space.shape) # grads are of shape (1,state_dim)
 
             # Optimizing the policy and value network
             b_inds = np.arange(args.batch_size)
@@ -388,7 +422,7 @@ if __name__ == "__main__":
                     end = start + args.minibatch_size
                     mb_inds = b_inds[start:end]
                     # mb_inds are the minibatch indices i.e. batch split into equal sized chunks
-                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                    _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds], b_sdfs[mb_inds], b_grads[mb_inds])
                     # compute the surrogate policy ratio pi/pi_old - in log space for numerical stability
                     logratio = newlogprob - b_logprobs[mb_inds]
                     ratio = logratio.exp()
@@ -490,23 +524,31 @@ if __name__ == "__main__":
          **env_kwargs
         ) for i in range(1)]
         )
-        obs, _ = envs.reset(seed=args.seed)
-        # reset the env to set the start/goal pos according to randomizer
+        obs, infos = envs.reset(seed=args.seed) # need to call with seed first time
+        sdfs = torch.Tensor(infos["sdf"]).to(device)
+        grads = torch.Tensor(infos["grad"]).to(device)
         for i in range(n_episodes):
             video = []
             over = False
             iters = 0
-            while not over and iters < 1000: # manual termination to prevent infinite loop
+            while not over and iters < 1000: # manual termination to prevent infinite episode length
                 with torch.no_grad():
-                    action = agent.actor_mean(torch.tensor(obs)) # deterministic action during inference
+                    u_rl, *_ = agent.actor_mean(torch.tensor(obs).to(device))
+                    u_safe = agent.cbf_qp(obs, u_rl, sdfs, grads)
+                    action = u_rl + u_safe
+                    # agent.get_action_and_value(torch.tensor(obs).to(device), sdfs, grads) # deterministic action during inference
                 obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
+                sdfs = torch.Tensor(infos["sdf"]).to(device)
+                grads = torch.Tensor(infos["grad"]).to(device)
                 rgb_array = envs.render()
                 video.append(rgb_array)
                 iters += 1
                 over = terminated or truncated
             os.makedirs(video_path, exist_ok=True)
             imageio.mimsave(f"{video_path}/ep_{i}.mp4", np.array(video).squeeze(), fps=30)
-            obs, _ = envs.reset() # don't call with seed again as it changes rng state
+            obs, infos = envs.reset() # don't call with seed again as it changes rng state
+            sdfs = torch.Tensor(infos["sdf"]).to(device)
+            grads = torch.Tensor(infos["grad"]).to(device)
         envs.close()
 
         if args.upload_model:
