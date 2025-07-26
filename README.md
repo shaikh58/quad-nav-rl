@@ -1,4 +1,4 @@
-## Autonomous Quadrotor 3D Navigation with Reinforcement Learning
+## Reinforcement learning approach to safe 3D autonomous navigation of a quadrotor
 
 This is a mini research project to learn, apply, and demonstrate the use of reinforcement learning to create a controller for a simulated quadrotor to navigate in a 3D environment. This project uses the [Mujoco](https://mujoco.org/) physics engine to simulate the quadrotor, and uses Proximal Policy Optimization ([PPO](https://github.com/vwxyzjn/cleanrl)), based on the cleanRL implementation.
 
