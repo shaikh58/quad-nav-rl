@@ -1,6 +1,6 @@
 ## Reinforcement learning approach to safe 3D autonomous navigation of a quadrotor
 
-This is a mini research project to learn, apply, and demonstrate the use of reinforcement learning to create a controller for a simulated quadrotor to navigate in a 3D environment. This project uses the [Mujoco](https://mujoco.org/) physics engine to simulate the quadrotor, and uses Proximal Policy Optimization [(PPO)](https://arxiv.org/pdf/1707.06347), based on the [cleanRL implementation](https://github.com/vwxyzjn/cleanrl).
+This is a small applied research project to learn, apply, and demonstrate the use of reinforcement learning to create a controller for navigating a simulated quadrotor in a 3D environment. This project uses the [Mujoco](https://mujoco.org/) physics engine to simulate the quadrotor, and uses Proximal Policy Optimization [(PPO)](https://arxiv.org/pdf/1707.06347), based on the [cleanRL implementation](https://github.com/vwxyzjn/cleanrl).
 
 Before we get into the details, let's take a look at some of the results. Currently, model is trained on a fixed goal start and goal location, and the quadrotor is able to navigate to the goal, and hover over it. 
 
@@ -8,7 +8,7 @@ Before we get into the details, let's take a look at some of the results. Curren
 ![Demo: RL Episode 5200 High Quality](demo-videos/rl-video-episode-5200-hq.gif)
 
 ### Key features:
-1. Custom Gymnasium environment based on the Mujoco [Skydio X2 model](https://github.com/google-deepmind/mujoco_menagerie/tree/main/skydio_x2).
+1. Custom Gymnasium environment based on the Mujoco [Skydio X2 model](https://github.com/google-deepmind/mujoco_menagerie/tree/main/skydio_x2)
 2. Parallel environments for higher training throughput
 3. Train using [PPO](https://github.com/vwxyzjn/cleanrl)
 4. Obstacle avoidance based on optimization approach (in progress)
@@ -19,8 +19,10 @@ Before we get into the details, let's take a look at some of the results. Curren
 #### Formulation
 - The navigation problem is formulated as a finite horizon (episodic), continuous time MDP
 - The quadrotor state is defined as ```x = [p, q, v, w]``` where ```p``` is the position, ```v``` is the velocity, ```q``` is the quaternion, and ```w``` is the angular velocity.
+
 #### Custom Gymnasium environment
-- Reward shaping with wandb hyperparameter sweeps to determine the optimal reward function
+- Reward shaping with adaptive difficulty tasks and intermediate rewards to guide learning
+- Wandb hyperparameter sweeps to determine the optimal reward function parameters
 - Termination conditions tuned to support efficient data collection
 - Supports start/goal location randomization during training to improve generalization; this requires goal conditioned training, which is not implemented yet.
 - Dynamic generation of obstacles using the MjSpec API. Can generate new obstacle configurations for each episode during training. 
