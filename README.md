@@ -1,6 +1,6 @@
 ## Reinforcement learning approach to safe 3D autonomous navigation of a quadrotor
 
-This is a small applied research project to learn, apply, and demonstrate the use of reinforcement learning to create a controller for navigating a simulated quadrotor in a 3D environment. This project uses the [Mujoco](https://mujoco.org/) physics engine to simulate the quadrotor, and uses Proximal Policy Optimization [(PPO)](https://arxiv.org/pdf/1707.06347), based on the [cleanRL implementation](https://github.com/vwxyzjn/cleanrl).
+This is a small applied research project to learn, apply, and demonstrate the use of reinforcement learning to create a controller for safe navigation of a simulated quadrotor in a 3D environment. This project uses the [Mujoco](https://mujoco.org/) physics engine to simulate the quadrotor, and uses Proximal Policy Optimization [(PPO)](https://arxiv.org/pdf/1707.06347), based on the [cleanRL implementation](https://github.com/vwxyzjn/cleanrl).
 
 Before we get into the details, let's take a look at some of the results. Currently, model is trained on a fixed goal start and goal location, and the quadrotor is able to navigate to the goal, and hover over it. 
 
@@ -9,7 +9,7 @@ Before we get into the details, let's take a look at some of the results. Curren
 
 ### Key features:
 1. Custom Gymnasium environment based on the Mujoco [Skydio X2 model](https://github.com/google-deepmind/mujoco_menagerie/tree/main/skydio_x2)
-2. Parallel environments for higher training throughput
+2. Parallel environments using AsyncVectorEnv for higher training throughput
 3. Train using [PPO](https://github.com/vwxyzjn/cleanrl)
 4. Obstacle avoidance based on optimization approach (in progress)
 5. Formulation and implementation of Euler-Lagrange [quadrotor dynamics](https://vnav.mit.edu/material/06-Control1-notes.pdf) in canonical form ```x_dot = f(x) + g(x)u```
@@ -22,12 +22,12 @@ Before we get into the details, let's take a look at some of the results. Curren
 
 #### Custom Gymnasium environment
 - Reward shaping with adaptive difficulty tasks and intermediate rewards to guide learning
-- Wandb hyperparameter sweeps to determine the optimal reward function parameters
 - Termination conditions tuned to support efficient data collection
-- Supports start/goal location randomization during training to improve generalization; this requires goal conditioned training, which is not implemented yet.
+- Wandb hyperparameter sweeps to determine the optimal reward function parameters
+- Start location randomization in each parallel env to improve generalization i.e. reach the target from any start location. This will enable future work in which the drone is routed through arbitrary paths
 - Dynamic generation of obstacles using the MjSpec API. Can generate new obstacle configurations for each episode during training. 
 - Reset noise to improve generalization
-- Wrapped the Gymnasium observation normalization wrapper to save normalization statistics learned during training. During evaluation on a new environment, it is important to load these normalization statistics and not calculate new ones.
+- Wrapped the Gym observation normalization wrapper to save normalization statistics learned during training. During evaluation on a new environment, it is important to load these normalization statistics and not calculate new ones.
 
 #### Obstacle Avoidance (in progress)
 - Reinforcement learning algorithms estimate the solution to an unconstrained optimization problem, and as such, do not provide mathematical guarantees for safety
