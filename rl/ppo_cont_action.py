@@ -50,7 +50,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 2
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -84,13 +84,11 @@ class Args:
     """whether to use a planner"""
     planner_type: str = "straight_line"
     """the type of planner to use"""
-    env_radius_lb: float = 5
-    """the lower bound of the environment radius"""
-    env_radius_ub: float = 20
-    """the upper bound of the environment radius"""
+    env_radius: float = 15
+    """the environment radius"""
     goal_threshold: float = 0.5
     """distance to goal for success"""
-    adaptive_goal_threshold: bool = False
+    adaptive_goal_threshold: bool = True
     """whether to adapt the goal threshold based on the training stage"""
     progress_type: str = "euclidean"
     """the type of progress to use"""
@@ -168,8 +166,8 @@ class Agent(nn.Module):
         )
         # Initialize final layer bias to output hover thrust
         with torch.no_grad():
-            # no action scaling
-            self.actor_mean[-1].bias.fill_(envs.envs[0].unwrapped.model.keyframe('hover').ctrl[0])
+            # no action scaling - for asyncvectorenv, cant access like envs.envs[0].unwrapped.model
+            self.actor_mean[-1].bias.fill_(envs.unwrapped.get_attr("model")[0].keyframe('hover').ctrl[0])
             # with action scaling - makes it worse
             # hover_thrust = envs.envs[0].unwrapped.model.keyframe('hover').ctrl[0]
             # # scale to [-1,1]
@@ -223,8 +221,7 @@ if __name__ == "__main__":
     start_location = [float(y) for x in args.start_location.split(",") for y in x if y.isdigit()] if args.start_location is not None else None
 
     env_kwargs = {
-        "env_radius_lb": args.env_radius_lb,
-        "env_radius_ub": args.env_radius_ub,
+        "env_radius": args.env_radius,
         "ctrl_cost_weight": args.ctrl_cost_weight,
         "progress_weight": args.progress_weight,
         "progress_type": args.progress_type,
@@ -249,9 +246,9 @@ if __name__ == "__main__":
     if args.progress_type == "negative": 
         args.gamma = 1
     # NOTE: the seed is the same for all envs to ensure same start/goal locations chosen by randomizer
-    # the seed will only be args.seed+i for goal conditioned RL
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type, **env_kwargs) for i in range(args.num_envs)]
+    # the seed will only be args.seed+i for having e.g. different start locations in each env
+    envs = gym.vector.AsyncVectorEnv(
+        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed + i, use_planner=args.use_planner, planner_type=args.planner_type, **env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -270,11 +267,11 @@ if __name__ == "__main__":
     global_step = 0
     start_time = time.time()
     next_obs, _ = envs.reset(seed=[args.seed+i for i in range(args.num_envs)])
-    for i, env in enumerate(envs.envs): 
-        print(f"Env: {i}", "Start: ", env.unwrapped.init_qpos[:3], "Target: ", env.unwrapped._target_location, 
-        "Env radius: ", env.unwrapped.model.stat.extent, 
-        "Distance from center: ", np.linalg.norm(env.unwrapped.init_qpos[:3] - env.unwrapped.model.stat.center),
-        "Target distance from center: ", np.linalg.norm(env.unwrapped._target_location - env.unwrapped.model.stat.center))
+    for i in range(args.num_envs):
+        print(f"Env: {i}", "Start: ", envs.unwrapped.get_attr("init_qpos")[i][:3], "Target: ", envs.unwrapped.get_attr("_target_location")[i], 
+        "Env radius: ", envs.unwrapped.get_attr("model")[i].stat.extent, 
+        "Distance from center: ", np.linalg.norm(envs.unwrapped.get_attr("init_qpos")[i][:3] - envs.unwrapped.get_attr("model")[i].stat.center),
+        "Target distance from center: ", np.linalg.norm(envs.unwrapped.get_attr("_target_location")[i] - envs.unwrapped.get_attr("model")[i].stat.center))
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     try:
@@ -309,16 +306,15 @@ if __name__ == "__main__":
                         if infos["termination_msg"][k] == "collision_obstacles":
                             print("Collision with obstacles")
                         if infos["termination_msg"][k] == "success":
-                            print("Success!!!", "End agent pos: ", infos["pos"][k], "Target pos: ", envs.envs[k].unwrapped._target_location)
+                            print("Success!!!", "Start agent pos: ", envs.unwrapped.get_attr("init_qpos")[k][:3], "End agent pos: ", infos["pos"][k], "Target pos: ", envs.unwrapped.get_attr("_target_location")[k])
                         # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
                         if "episode" in infos:
                             writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
                             writer.add_scalar("charts/episodic_length", infos["episode"]["l"][k], global_step)
             
             if args.adaptive_goal_threshold:
-                for k in range(args.num_envs):
-                    frac = 1.0 - (iteration - 1.0) / args.num_iterations
-                    envs.envs[k].unwrapped._goal_threshold = frac * args.goal_threshold
+                frac = 1.0 - (iteration - 1.0) / args.num_iterations
+                envs.set_attr("_goal_threshold", frac * args.goal_threshold) # set for all envs
                     
             # bootstrap value if not done
             with torch.no_grad():
@@ -437,12 +433,11 @@ if __name__ == "__main__":
 
         print("Beginning eval...") 
         video_path=f"videos/{run_name}-eval"
-        # get the actual start/goal/extent used for training (after randomization)
-        start_location = envs.envs[0].unwrapped.init_qpos[:3]
-        target_location = envs.envs[0].unwrapped._target_location
-        radius = envs.envs[0].unwrapped.model.stat.extent
+        target_location = envs.unwrapped.get_attr("_target_location")[0]
+        radius = envs.unwrapped.get_attr("model")[0].stat.extent
         # override the env kwargs with the actual start/goal/extent used for training
-        env_kwargs["start_location"] = start_location
+        # don't pass in start location as it's randomized during training and rollout by the env_config_generator
+        env_kwargs["start_location"] = None
         env_kwargs["target_location"] = target_location
         env_kwargs["radius"] = radius
         env_kwargs["goal_threshold"] = args.goal_threshold
@@ -451,7 +446,7 @@ if __name__ == "__main__":
         n_episodes = 5
 
         # custom eval using exact same env as env of rank 0 (this is the env that has video capture during training)
-        envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference; even though its True, it uses passed in start/goal
+        envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference, except start position
         [make_env(args.env_id, 0, False, 
         run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type,  
          **env_kwargs

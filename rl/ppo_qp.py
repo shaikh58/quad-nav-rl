@@ -85,10 +85,8 @@ class Args:
     """whether to use a planner"""
     planner_type: str = "straight_line"
     """the type of planner to use"""
-    env_radius_lb: float = 5
-    """the lower bound of the environment radius"""
-    env_radius_ub: float = 20
-    """the upper bound of the environment radius"""
+    env_radius: float = 15
+    """the environment radius"""
     goal_threshold: float = 0.5
     """distance to goal for success"""
     adaptive_goal_threshold: bool = False
@@ -284,8 +282,7 @@ if __name__ == "__main__":
     start_location = [float(y) for x in args.start_location.split(",") for y in x if y.isdigit()] if args.start_location is not None else None
 
     env_kwargs = {
-        "env_radius_lb": args.env_radius_lb,
-        "env_radius_ub": args.env_radius_ub,
+        "env_radius": args.env_radius,
         "ctrl_cost_weight": args.ctrl_cost_weight,
         "progress_weight": args.progress_weight,
         "progress_type": args.progress_type,
@@ -310,7 +307,7 @@ if __name__ == "__main__":
     if args.progress_type == "negative": 
         args.gamma = 1
     # NOTE: the seed is the same for all envs to ensure same start/goal locations chosen by randomizer
-    # the seed will only be args.seed+i for goal conditioned RL
+    # the seed will only be args.seed+i for having e.g. different start locations in each env
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type, **env_kwargs) for i in range(args.num_envs)]
     )
@@ -505,11 +502,11 @@ if __name__ == "__main__":
         print("Beginning eval...") 
         video_path=f"videos/{run_name}-eval"
         # get the actual start/goal/extent used for training (after randomization)
-        start_location = envs.envs[0].unwrapped.init_qpos[:3]
         target_location = envs.envs[0].unwrapped._target_location
         radius = envs.envs[0].unwrapped.model.stat.extent
         # override the env kwargs with the actual start/goal/extent used for training
-        env_kwargs["start_location"] = start_location
+        # don't pass in start location as it's randomized during training and rollout by the env_config_generator
+        env_kwargs["start_location"] = None
         env_kwargs["target_location"] = target_location
         env_kwargs["radius"] = radius
         env_kwargs["goal_threshold"] = args.goal_threshold
@@ -518,7 +515,7 @@ if __name__ == "__main__":
         n_episodes = 5
 
         # custom eval using exact same env as env of rank 0 (this is the env that has video capture during training)
-        envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference; even though its True, it uses passed in start/goal
+        envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference, except start position
         [make_env(args.env_id, 0, False, 
         run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type,  
          **env_kwargs

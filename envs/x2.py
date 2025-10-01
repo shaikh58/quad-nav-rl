@@ -200,6 +200,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         use a smooth approximation of the min function, i.e. the log sum exp function.
         """
         dists_to_obstacles = []
+        if not self._use_obstacles:
+            return np.inf, np.inf
         for obstacle in self.obstacle_metadata:
             # check distance of each rotor to the obstacle, accounting for rotor radius
             min_dist = np.inf

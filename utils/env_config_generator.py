@@ -14,8 +14,7 @@ class EnvironmentConfigGenerator:
     
     def __init__(self, seed, **kwargs):
         self.kwargs = kwargs
-        self.env_radius_lb = self.kwargs.get("env_radius_lb", 3)
-        self.env_radius_ub = self.kwargs.get("env_radius_ub", 15)
+        self.env_radius = self.kwargs.get("env_radius", 15)
         self.start_orientation = np.array([1, 0, 0, 0])
         self.start_vel = np.array([0, 0, 0, 0, 0, 0])
         # if user passes in start/goal locations, use them
@@ -25,16 +24,24 @@ class EnvironmentConfigGenerator:
         self.min_distance = self.kwargs.get("min_distance", 3.0)
         
         self.rng = np.random.default_rng(seed)
+        # hardcode the goal seed so it always chooses the same goal
+        self.goal_rng = np.random.default_rng(seed=529012)
         
         # Default values for center when calculating bounds
         self.default_center = np.array([0, 0, 0.1])
 
-    def sample_sphere(self, extent: float) -> np.ndarray:
+    def sample_sphere(self, extent: float, type: str = "start") -> np.ndarray:
         """Sample x,y,z inside a spherical region."""
-        azimuth = self.rng.uniform(0, 2*np.pi) 
-        elevation = self.rng.uniform(0, np.pi/2)
+        if type == "start":
+            rng = self.rng
+        elif type == "goal":
+            rng = self.goal_rng
+        else:
+            raise ValueError(f"Invalid type: {type}")
+        azimuth = rng.uniform(0, 2*np.pi) 
+        elevation = rng.uniform(0, np.pi/2)
         # don't let the start/goal be too close to the bounds of the env
-        radius = self.rng.uniform(0, extent - 3.0)
+        radius = rng.uniform(0, extent - 3.0)
         # extent is radius of the sphere
         x = radius * np.cos(elevation) * np.sin(azimuth)
         y = radius * np.cos(azimuth) * np.cos(elevation)
@@ -48,7 +55,7 @@ class EnvironmentConfigGenerator:
             start_dist_center = np.linalg.norm(np.array(self.start_location) - self.default_center)
             return max(goal_dist_center, start_dist_center) + 5.0
         else:
-            return self.rng.uniform(self.env_radius_lb, self.env_radius_ub)
+            return self.env_radius
 
     def set_initial_state(self, env_radius: float) -> np.ndarray:
         """Generate initial state configuration."""
@@ -63,11 +70,14 @@ class EnvironmentConfigGenerator:
             return np.array(self.target_location)
         
         # Ensure target is at least min_distance away from start
-        max_attempts = 100
-        for _ in range(max_attempts):
-            target_pos = self.sample_sphere(env_radius)
-            if np.linalg.norm(target_pos - start_location) >= self.min_distance:
-                break
+        # OVERRIDE: don't check distance from start as this changes the goal location since the sampling returns different values
+        # max_attempts = 100
+        # for _ in range(max_attempts):
+        target_pos = self.sample_sphere(env_radius, type="goal")
+        # reseed the generator so it chooses the same goal
+        self.goal_rng = np.random.default_rng(seed=529012)
+            # if np.linalg.norm(target_pos - start_location) >= self.min_distance:
+            #     break
         return target_pos
 
     def sample_obstacle_params(self) -> Dict:
