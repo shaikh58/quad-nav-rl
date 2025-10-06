@@ -9,11 +9,12 @@ Before we get into the details, let's take a look at some of the results. Curren
 
 ### Key features:
 1. Custom Gymnasium environment based on the Mujoco [Skydio X2 model](https://github.com/google-deepmind/mujoco_menagerie/tree/main/skydio_x2)
-2. Parallel environments using AsyncVectorEnv for higher training throughput
+2. Parallel environments using AsyncVectorEnv for more efficient data collection
 3. Train using [PPO](https://github.com/vwxyzjn/cleanrl)
-4. Obstacle avoidance based on optimization approach (in progress)
-5. Formulation and implementation of Euler-Lagrange [quadrotor dynamics](https://vnav.mit.edu/material/06-Control1-notes.pdf) in canonical form ```x_dot = f(x) + g(x)u```
-6. Dynamic environment generation during training episode rollouts using MjSpec
+4. (In progress) Obstacle avoidance based on an optimization approach that learns a compensator, using control barrier functions
+5. Formulation and implementation of Euler-Lagrange [quadrotor dynamics](https://vnav.mit.edu/material/06-Control1-notes.pdf) in canonical form $\dot x = f(x) + g(x)u$.
+6. Neural-net based residual model to account for differences in Euler Lagrange and Mujoco forward dynamics, as well as incorporating Mujoco [inertia-based aerodynamics modelling](https://mujoco.readthedocs.io/en/latest/computation/fluid.html#flinertia) of drag forces and torques into the analytical equations: $\dot x = f(x) + f_{residual}(x) + g(x, \tau_{d}, f_d)u$
+7. Dynamic environment generation during episode rollouts using MjSpec to support future generalizability work
 
 ### Details
 #### Formulation
