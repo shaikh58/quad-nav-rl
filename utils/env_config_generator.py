@@ -49,38 +49,39 @@ class EnvironmentConfigGenerator:
         return np.array([x, y, z])
 
     def set_env_bounds(self) -> float:
-        """Set environment bounds based on user overrides or random sampling."""
-        if self.start_location is not None or self.target_location is not None:
-            goal_dist_center = np.linalg.norm(np.array(self.target_location) - self.default_center)
-            start_dist_center = np.linalg.norm(np.array(self.start_location) - self.default_center)
-            return max(goal_dist_center, start_dist_center) + 5.0
-        else:
-            return self.env_radius
+        """Set environment radius bound."""
+        return self.env_radius
 
     def set_initial_state(self, env_radius: float) -> np.ndarray:
         """Generate initial state configuration."""
         if self.start_location is not None:
             return np.array(self.start_location)
         else:
-            return self.sample_sphere(env_radius)
+            # ensure start is at least min_distance away from target
+            max_attempts = 100
+            for _ in range(max_attempts):
+                start_pos = self.sample_sphere(env_radius)
+                if np.linalg.norm(start_pos - self.target_location) >= self.min_distance:
+                    break
+        self.start_location = start_pos
+        return start_pos
 
-    def set_goal_state(self, env_radius: float, start_location: np.ndarray) -> np.ndarray:
+    def set_goal_state(self, env_radius: float) -> np.ndarray:
         """Generate goal state configuration."""
         if self.target_location is not None:
             return np.array(self.target_location)
         
-        # Ensure target is at least min_distance away from start
-        # OVERRIDE: don't check distance from start as this changes the goal location since the sampling returns different values
-        # max_attempts = 100
-        # for _ in range(max_attempts):
         target_pos = self.sample_sphere(env_radius, type="goal")
+        self.target_location = target_pos
         # reseed the generator so it chooses the same goal
         self.goal_rng = np.random.default_rng(seed=529012)
-            # if np.linalg.norm(target_pos - start_location) >= self.min_distance:
-            #     break
+
         return target_pos
 
     def sample_obstacle_params(self) -> Dict:
+
+        # TODO: fix this similar to the parallel env seeding - ensure the same obstacles are sampled every time in a given env
+        
         """Sample obstacle parameters from uniform distributions."""
         params = {}
         params["num_obstacles"] = self.rng.integers(
@@ -92,6 +93,9 @@ class EnvironmentConfigGenerator:
         return params
 
     def add_obstacles(self, start_location: np.ndarray, target_location: np.ndarray) -> List[Dict]:
+        
+        # TODO: fix this function too 
+        
         """Generate obstacles configuration."""
         obstacles = []
         params = self.sample_obstacle_params()
@@ -129,12 +133,12 @@ class EnvironmentConfigGenerator:
 
         env_radius = self.set_env_bounds()
         config["radius"] = env_radius
+
+        target_location = self.set_goal_state(env_radius)
+        config["target_location"] = target_location
         
         start_location = self.set_initial_state(env_radius)
         config["start_location"] = start_location
-        
-        target_location = self.set_goal_state(env_radius, start_location)
-        config["target_location"] = target_location
         # obstacles are dynamically added in the enivronment code, using the method add_obstacles()
         
         return config 

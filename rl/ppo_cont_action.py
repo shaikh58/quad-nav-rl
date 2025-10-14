@@ -262,6 +262,8 @@ if __name__ == "__main__":
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    all_advs = []
+    env_success_ctrs = [0] * args.num_envs
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -270,8 +272,8 @@ if __name__ == "__main__":
     for i in range(args.num_envs):
         print(f"Env: {i}", "Start: ", envs.unwrapped.get_attr("init_qpos")[i][:3], "Target: ", envs.unwrapped.get_attr("_target_location")[i], 
         "Env radius: ", envs.unwrapped.get_attr("model")[i].stat.extent, 
-        "Distance from center: ", np.linalg.norm(envs.unwrapped.get_attr("init_qpos")[i][:3] - envs.unwrapped.get_attr("model")[i].stat.center),
-        "Target distance from center: ", np.linalg.norm(envs.unwrapped.get_attr("_target_location")[i] - envs.unwrapped.get_attr("model")[i].stat.center))
+        # "Distance from center: ", np.linalg.norm(envs.unwrapped.get_attr("init_qpos")[i][:3] - envs.unwrapped.get_attr("model")[i].stat.center),
+        "Target distance from agent start pos: ", np.linalg.norm(envs.unwrapped.get_attr("_target_location")[i] - envs.unwrapped.get_attr("init_qpos")[i][:3]))
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     try:
@@ -306,16 +308,22 @@ if __name__ == "__main__":
                         if infos["termination_msg"][k] == "collision_obstacles":
                             print("Collision with obstacles")
                         if infos["termination_msg"][k] == "success":
-                            print("Success!!!", "Start agent pos: ", envs.unwrapped.get_attr("init_qpos")[k][:3], "End agent pos: ", infos["pos"][k], "Target pos: ", envs.unwrapped.get_attr("_target_location")[k])
+                            start_pos = envs.unwrapped.get_attr("init_qpos")[k][:3]
+                            end_pos = infos["pos"][k]
+                            target_pos = envs.unwrapped.get_attr("_target_location")[k]
+                            if np.linalg.norm(start_pos - end_pos) > 5: # TODO: hardcoded threshold
+                                env_success_ctrs[k] += 1
+                                print("Success!!!", "Start agent pos: ", start_pos, "End agent pos: ", end_pos, "Target pos: ", target_pos, "Success count: ", env_success_ctrs[k])
                         # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
                         if "episode" in infos:
                             writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
                             writer.add_scalar("charts/episodic_length", infos["episode"]["l"][k], global_step)
             
             if args.adaptive_goal_threshold:
-                frac = 1.0 - (iteration - 1.0) / args.num_iterations
+                frac = max(1.0 - (iteration - 1.0) / (args.num_iterations), 0.5) # TODO: hardcoded 0.5; don't want to make the goal too small
                 envs.set_attr("_goal_threshold", frac * args.goal_threshold) # set for all envs
-                    
+                print("Reducing goal threshold to: ", frac * args.goal_threshold)
+                
             # bootstrap value if not done
             with torch.no_grad():
                 next_value = agent.get_value(next_obs).reshape(1, -1)
@@ -339,6 +347,8 @@ if __name__ == "__main__":
             b_logprobs = logprobs.reshape(-1)
             b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
             b_advantages = advantages.reshape(-1)
+            # save advs for debugging
+            all_advs.append(advantages)
             b_returns = returns.reshape(-1)
             b_values = values.reshape(-1)
 
@@ -420,6 +430,10 @@ if __name__ == "__main__":
                     writer.add_histogram(f'gradients/{name}/histogram', param.grad, global_step)
         print("Total training time:", time.time() - start_time)
         # save some videos (create an env, rollout, and capture the video)
+        all_advs = np.stack(all_advs)
+        env_success_ctrs = np.array(env_success_ctrs)
+        np.save(f"runs/{run_name}/all_advs.npy", all_advs)
+        np.save(f"runs/{run_name}/env_success_ctrs.npy", env_success_ctrs)
 
     except KeyboardInterrupt:
         print("Training interrupted by user - saving model and running eval")

@@ -1,3 +1,6 @@
+"""Deprecated - no longer using CBF QP"""
+
+
 import numpy as np
 import torch
 

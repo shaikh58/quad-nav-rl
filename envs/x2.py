@@ -144,7 +144,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
         )
         self.trajectory = None
-        # TODO: maybe this should just be done in reset()
+        
         self.set_start_location() 
         self.set_start_goal_geoms()
         self.set_env_radius()
@@ -282,7 +282,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             q_conj = np.array([1,0,0,0])
             q_product = multiply_quaternions(q, q_conj)
             angle_diff = 2 * np.arccos(np.clip(q_product[0], -1, 1))
-            print(f"Angle diff at success: {angle_diff}")
+            # print(f"Angle diff at success: {angle_diff}")
             reward_components["success"] = self._success_weight * np.abs(2*np.pi - angle_diff.item())
         # body rate penalty
         body_rate = np.linalg.norm(self.data.qvel[3:6])
@@ -324,9 +324,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         if self.render_mode == "human":
             self.render()
         # compute sdf and gradient wrt state and output for agent forward pass
-        sdf, grad = self.sdf_obstacle()
-        info["sdf"] = sdf
-        info["grad"] = grad
+        # sdf, grad = self.sdf_obstacle()
+        # info["sdf"] = sdf
+        # info["grad"] = grad
 
         return ob, info
 
@@ -401,9 +401,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         info["reward"] = reward
         info["reward_components"] = reward_components
         info["termination_msg"] = msg
-        sdf, grad = self.sdf_obstacle()
-        info["sdf"] = sdf
-        info["grad"] = grad
+        # sdf, grad = self.sdf_obstacle()
+        # info["sdf"] = sdf
+        # info["grad"] = grad
         self.info = info # set info to be used in render() - called by RecordVideo wrapper
         # episode length is automatically added by RecordEpisodeStatistics wrapper
         if self.render_mode == "human":

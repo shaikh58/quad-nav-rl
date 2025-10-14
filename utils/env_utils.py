@@ -19,7 +19,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
             env = gym.make(env_id, render_mode="rgb_array", 
                 config_generator=config_generator, **kwargs)
             video_path = kwargs.get("video_path", f"videos/{run_name}")
-            env = gym.wrappers.RecordVideo(env, f"{video_path}", episode_trigger=lambda x: x % 300 == 0)
+            env = gym.wrappers.RecordVideo(env, f"{video_path}", episode_trigger=lambda x: x % 700 == 0)
         else:
             env = gym.make(env_id, config_generator=config_generator, **kwargs)
         # TODO: move this to config generator

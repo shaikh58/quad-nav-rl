@@ -1,3 +1,6 @@
+"""Deprecated"""
+
+
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
 import os
 import random
@@ -191,7 +194,7 @@ class QP(nn.Module):
         # CBF formulation RHS is expanded to isolate the RL control from the optimization variable u
         # and get the inequality in canonical form Gz <= h
         # NOTE: sign is +ve since QP canonical form uses less than for inequality constraints
-        # h is batched (n_envs, 1)
+        # h is batched (n_envs, 1); NOTE h in this context is not the barrier fcn, but the QP h in GZ <= h
         # TODO: fix the dimensions of the args of h esp the last term
         h = self.s0 + self.alpha * sdfs + torch.mm(grads, f) + torch.mm(grads, torch.bmm(g, u_rl))
         e = torch.Tensor() # empty placeholder since no equality constraints
