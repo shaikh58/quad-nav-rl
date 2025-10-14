@@ -19,7 +19,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
             env = gym.make(env_id, render_mode="rgb_array", 
                 config_generator=config_generator, **kwargs)
             video_path = kwargs.get("video_path", f"videos/{run_name}")
-            env = gym.wrappers.RecordVideo(env, f"{video_path}", episode_trigger=lambda x: x % 700 == 0)
+            env = gym.wrappers.RecordVideo(env, f"{video_path}", episode_trigger=lambda x: x % 400 == 0)
         else:
             env = gym.make(env_id, config_generator=config_generator, **kwargs)
         # TODO: move this to config generator
@@ -39,7 +39,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         # no need to set truncations in env.step() as TimeLimit wrapper handles it
-        max_steps = kwargs.get("max_steps", 3000)
+        max_steps = kwargs.get("max_steps", 2000)
         env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
         return env
 
@@ -76,15 +76,8 @@ class NormalizeObservation(
         gym.ObservationWrapper.__init__(self, env)
 
         assert env.observation_space.shape is not None
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=env.observation_space.shape,
-            dtype=np.float32,
-        )
-
         self.obs_rms = RunningMeanStd(
-            shape=self.observation_space.shape, dtype=self.observation_space.dtype
+            shape=env.observation_space.shape, dtype=env.observation_space.dtype
         )
         self.epsilon = epsilon
         self._update_running_mean = mode == "train"

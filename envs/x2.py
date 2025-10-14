@@ -6,7 +6,6 @@ from gymnasium.spaces import Box
 import xml.etree.ElementTree as ET
 import os
 from utils.env_utils import multiply_quaternions
-from utils.utils import softmin, grad_sdf_softmin, grad_sdf
 import mujoco
 from utils.env_config_generator import EnvironmentConfigGenerator
 from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
@@ -44,9 +43,13 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         config_generator: EnvironmentConfigGenerator = None,
         use_obstacles: bool = False,
         regen_obstacles: bool = False,
-        obs_regen_eps: float = 0.8, # prob with which to resample obstacles after each episode
+        obs_regen_eps: float = 0.8, # prob with which to resample obstacles after each episode,
+        top_k_obstacles: int = 5,
         **kwargs,
     ):
+        self.observation_space = Box(
+            low=-np.inf, high=np.inf, shape=(13 + 3 + 3*top_k_obstacles,), dtype=np.float64
+        ) # position (3), velocity (3), goal_relative (3), vecs_to_obstacles (3*top_k_obstacles)
         self.render_mode = kwargs.get("render_mode", "rgb_array")
 
         if xml_file is None:
@@ -68,6 +71,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             success_weight,
             **kwargs,
         )
+        
         # generate env configs
         self._config_generator = config_generator
         env_config = self._config_generator.generate_env_config()
@@ -133,18 +137,15 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self._mode = mode
         self._obs_regen_eps = obs_regen_eps
         self._regen_obstacles = regen_obstacles
-
+        self._top_k_obstacles = top_k_obstacles
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
         self.hover_thrust = self.model.keyframe('hover').ctrl.copy()
         # qpos is (7,) (x, y, z, qw, qx, qy, qz)
         # qvel is (6,) (vx, vy, vz, wx, wy, wz)
         obs_size = self.data.qpos.size + self.data.qvel.size
-        self.observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
-        )
         self.trajectory = None
-        
+        self.obs_dist_pad = 1e5
         self.set_start_location() 
         self.set_start_goal_geoms()
         self.set_env_radius()
@@ -167,7 +168,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                 raise ValueError(f"Invalid obstacle type: {obs_type}")
             self.mj_spec.worldbody.add_geom(name=name,
                             type=obs_type,
-                            rgba=[0, 0, 1, 1], # all obstacles are blue
+                            rgba=[1, 0, 0, 1], # all obstacles are red
                             pos=pos,
                             size=[radius, radius, 0])
         # print(f"Added {len(self.obstacle_metadata)} obstacles")
@@ -192,16 +193,11 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                 self.model.geom_pos[i] = self._target_location 
     
     def sdf_obstacle(self):
-        """This implementation uses min_{all obstacles} SDF(x,obstacle set), i.e. 
-        the distance to the nearest obstacle; however, this introduces a min function
-        which is not differentiable. We could represent the obstacle set O as a union of 
-        all obstacles, and computing SDF and gradient wrt all obstacles. However, this leads to 
-        a vector valued SDF, which violates the SDF requirement of a scalar function. We can
-        use a smooth approximation of the min function, i.e. the log sum exp function.
+        """Computes SDF to all obstacles accounting for rotor position, radius, and obstacle position, radius.
+        Only used with obstacle avoidance = True
         """
         dists_to_obstacles = []
-        if not self._use_obstacles:
-            return np.inf, np.inf
+        vecs_to_obstacles = []
         for obstacle in self.obstacle_metadata:
             # check distance of each rotor to the obstacle, accounting for rotor radius
             min_dist = np.inf
@@ -209,19 +205,16 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                 rotor_pos = self.model.geom(f'rotor{i+1}').pos
                 rotor_radius = self.model.geom(f'rotor{i+1}').size[0]
                 # distance to boundary of obstacle, from edge of rotor
-                dist = np.linalg.norm(rotor_pos - np.array(obstacle["position"])) - obstacle['radius'] - rotor_radius
-                # NOTE: we can use this non differentiable approximation of the dist of quadrotor
-                # to account for rotors. Assuming rotor dists won't be too different from main body dist.
-                min_dist = min(min_dist, dist)
+                dist = np.linalg.norm(rotor_pos - np.array(obstacle["position"]))\
+                     - obstacle['radius'] - rotor_radius
+                # Get min and argmin
+                if dist < min_dist:
+                    min_dist = dist
+                    min_arg = i
             dists_to_obstacles.append(min_dist)
-        # TODO: uncomment this line to use softmin, else keep regular min
-        # sdf = softmin(dists_to_obstacles)
-        closest_obs_ix = np.argmin(dists_to_obstacles)
-        sdf = dists_to_obstacles[closest_obs_ix]
-        # compute sdf and gradient together to avoid relying on data in env state
-        state = np.concatenate((self.data.qpos, self.data.qvel))
-        grad = grad_sdf(state, self.obstacle_metadata[closest_obs_ix]["position"])
-        return sdf, grad
+            vec_to_obs = self.model.geom(f'rotor{min_arg+1}').pos - obstacle["position"]
+            vecs_to_obstacles.append(vec_to_obs)
+        return np.array(dists_to_obstacles), np.array(vecs_to_obstacles)
     
     def control_cost(self, action):
         control_cost = self._ctrl_cost_weight * np.sum(np.square(action))
@@ -230,7 +223,18 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
     def _get_obs(self):
         position = self.data.qpos.flatten()
         velocity = self.data.qvel.flatten()
-        observation = np.concatenate((position, velocity))
+        goal_relative = self.data.qpos[:3] - self._target_location
+        observation = np.concatenate((position, velocity, goal_relative, 
+                            np.full(self._top_k_obstacles*3, self.obs_dist_pad)))
+        if self._use_obstacles:
+            obs_dists, vecs_to_obstacles = self.sdf_obstacle()
+            inds = np.argsort(obs_dists)[:self._top_k_obstacles]
+            obs_dists = obs_dists[inds]
+            vecs_to_obstacles = vecs_to_obstacles[inds]
+            vecs_to_obstacles = np.pad(vecs_to_obstacles.flatten(), 
+                                    (0, self._top_k_obstacles*3 - vecs_to_obstacles.shape[0]*3), 
+                                    constant_values=self.obs_dist_pad)
+            observation = np.concatenate((position, velocity, goal_relative, vecs_to_obstacles))
         return observation
 
     def set_trajectory(self, trajectory, info):
@@ -305,7 +309,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             print("Regenerating obstacles")
             self.mj_spec = mujoco.MjSpec.from_file(self.xml_file)
             # generate obstacles at the beginning; possibly regenerate after each episode
-            self.obstacle_metadata = self._config_generator.add_obstacles(self._start_location, self._target_location)
+            self.obstacle_metadata = self._config_generator.add_obstacles(
+                self._start_location, self._target_location
+                )
             self.generate_obstacle_geoms()
             self.model, self.data = self.mj_spec.recompile(self.model, self.data)
             self.init_qpos = self.data.qpos.ravel().copy()
@@ -323,11 +329,6 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         info = self._get_reset_info()
         if self.render_mode == "human":
             self.render()
-        # compute sdf and gradient wrt state and output for agent forward pass
-        # sdf, grad = self.sdf_obstacle()
-        # info["sdf"] = sdf
-        # info["grad"] = grad
-
         return ob, info
 
     def reset_model(self):
@@ -356,7 +357,6 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         observation = self._get_obs()
         # initialize previous pos to current pos
         self.prev_pos = qpos[:3].copy()
-
         return observation
     
     def _get_reset_info(self):
@@ -401,14 +401,10 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         info["reward"] = reward
         info["reward_components"] = reward_components
         info["termination_msg"] = msg
-        # sdf, grad = self.sdf_obstacle()
-        # info["sdf"] = sdf
-        # info["grad"] = grad
         self.info = info # set info to be used in render() - called by RecordVideo wrapper
         # episode length is automatically added by RecordEpisodeStatistics wrapper
         if self.render_mode == "human":
             self.render()
-
         # truncation=False as the time limit is handled by the `TimeLimit` wrapper added during `make`
         return observation, reward, terminated, False, info
 

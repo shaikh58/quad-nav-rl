@@ -50,7 +50,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 2
+    num_envs: int = 1
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -92,7 +92,7 @@ class Args:
     """whether to adapt the goal threshold based on the training stage"""
     progress_type: str = "euclidean"
     """the type of progress to use"""
-    min_height: float = 0.1
+    min_height: float = 0.5
     """minimum height above ground before ground collision"""
     ctrl_cost_weight: float = 0.1
     """control cost penalty for reward"""
@@ -116,7 +116,7 @@ class Args:
     """the maximum number of steps per episode before truncation"""
     reset_noise_scale: float = 1e-1
     """the noise scale for the reset"""
-    use_obstacles: bool = False
+    use_obstacles: bool = True
     """whether to use obstacles"""
     regen_obstacles: bool = False
     """whether to regenerate obstacles at the end of each episode (w.p. obs_regen_eps)"""
@@ -247,7 +247,7 @@ if __name__ == "__main__":
         args.gamma = 1
     # NOTE: the seed is the same for all envs to ensure same start/goal locations chosen by randomizer
     # the seed will only be args.seed+i for having e.g. different start locations in each env
-    envs = gym.vector.AsyncVectorEnv(
+    envs = gym.vector.AsyncVectorEnv( # TODO: args.seed + i
         [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed + i, use_planner=args.use_planner, planner_type=args.planner_type, **env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
@@ -268,12 +268,13 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     global_step = 0
     start_time = time.time()
-    next_obs, _ = envs.reset(seed=[args.seed+i for i in range(args.num_envs)])
+    # TODO: add +i to args.seed to create different start positions in each env
+    next_obs, _ = envs.reset(seed=[args.seed + i for i in range(args.num_envs)])
     for i in range(args.num_envs):
         print(f"Env: {i}", "Start: ", envs.unwrapped.get_attr("init_qpos")[i][:3], "Target: ", envs.unwrapped.get_attr("_target_location")[i], 
         "Env radius: ", envs.unwrapped.get_attr("model")[i].stat.extent, 
-        # "Distance from center: ", np.linalg.norm(envs.unwrapped.get_attr("init_qpos")[i][:3] - envs.unwrapped.get_attr("model")[i].stat.center),
-        "Target distance from agent start pos: ", np.linalg.norm(envs.unwrapped.get_attr("_target_location")[i] - envs.unwrapped.get_attr("init_qpos")[i][:3]))
+        "Target distance from agent start pos: ", np.linalg.norm(envs.unwrapped.get_attr("_target_location")[i] - envs.unwrapped.get_attr("init_qpos")[i][:3]),
+        "Number of obstacles: ", len(envs.unwrapped.get_attr("obstacle_metadata")[i]))
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     try:
@@ -311,16 +312,15 @@ if __name__ == "__main__":
                             start_pos = envs.unwrapped.get_attr("init_qpos")[k][:3]
                             end_pos = infos["pos"][k]
                             target_pos = envs.unwrapped.get_attr("_target_location")[k]
-                            if np.linalg.norm(start_pos - end_pos) > 5: # TODO: hardcoded threshold
-                                env_success_ctrs[k] += 1
-                                print("Success!!!", "Start agent pos: ", start_pos, "End agent pos: ", end_pos, "Target pos: ", target_pos, "Success count: ", env_success_ctrs[k])
+                            env_success_ctrs[k] += 1
+                            print("Success!!!", "Start agent pos: ", start_pos, "End agent pos: ", end_pos, "Target pos: ", target_pos, "Success count: ", env_success_ctrs[k])
                         # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
                         if "episode" in infos:
                             writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
                             writer.add_scalar("charts/episodic_length", infos["episode"]["l"][k], global_step)
             
             if args.adaptive_goal_threshold:
-                frac = max(1.0 - (iteration - 1.0) / (args.num_iterations), 0.5) # TODO: hardcoded 0.5; don't want to make the goal too small
+                frac = max(1.0 - (iteration - 1.0) / (args.num_iterations), 0.2) # TODO: hardcoded; don't want to make the goal too small
                 envs.set_attr("_goal_threshold", frac * args.goal_threshold) # set for all envs
                 print("Reducing goal threshold to: ", frac * args.goal_threshold)
                 
@@ -456,6 +456,9 @@ if __name__ == "__main__":
         env_kwargs["radius"] = radius
         env_kwargs["goal_threshold"] = args.goal_threshold
         env_kwargs["mode"] = "eval"
+        env_kwargs["use_obstacles"] = args.use_obstacles
+        env_kwargs["regen_obstacles"] = args.regen_obstacles
+        env_kwargs["obs_regen_eps"] = args.obs_regen_eps
 
         n_episodes = 5
 

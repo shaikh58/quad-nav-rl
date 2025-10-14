@@ -21,7 +21,7 @@ class EnvironmentConfigGenerator:
         self.start_location = self.kwargs.get("start_location", None)
         self.target_location = self.kwargs.get("target_location", None)
         # min distance between start and target
-        self.min_distance = self.kwargs.get("min_distance", 3.0)
+        self.min_distance = self.kwargs.get("min_distance", 5.0)
         
         self.rng = np.random.default_rng(seed)
         # hardcode the goal seed so it always chooses the same goal
@@ -84,12 +84,12 @@ class EnvironmentConfigGenerator:
         
         """Sample obstacle parameters from uniform distributions."""
         params = {}
-        params["num_obstacles"] = self.rng.integers(
+        params["num_obstacles"] = self.rng.integers( # obstacles can use the same rng as start position as we want it different in each env
             self.kwargs.get("obstacle_count_lb", 1),
-            self.kwargs.get("obstacle_count_ub", 3) + 1
+            self.kwargs.get("obstacle_count_ub", 2) + 1
         )
         params["min_radius"] = 0.05
-        params["max_radius"] = 0.1
+        params["max_radius"] = 0.2
         return params
 
     def add_obstacles(self, start_location: np.ndarray, target_location: np.ndarray) -> List[Dict]:
@@ -100,17 +100,14 @@ class EnvironmentConfigGenerator:
         obstacles = []
         params = self.sample_obstacle_params()
         for i in range(params["num_obstacles"]):
-            # azimuth = self.rng.uniform(0, 2*np.pi)
-            # elevation = self.rng.uniform(0, np.pi/2)  # Keep obstacles in upper hemisphere
             # place the obstacle between start and target
             dir_vec = target_location - start_location
             dir_vec = dir_vec / np.linalg.norm(dir_vec)
-            distance = self.rng.uniform(0,1) * np.linalg.norm(target_location - start_location)
+            # TODO: use goal_rng to keep same obstacles, otherwise use rng
+            # 0.3-0.7 to ensure obstacles are not too close to the start or target
+            distance = self.rng.uniform(0.3,0.7) * np.linalg.norm(target_location - start_location)
             # project the obstacle onto the line between start and target
             obstacle_pos = start_location + distance * dir_vec
-            # x = distance * np.cos(elevation) * np.sin(azimuth)
-            # y = distance * np.cos(azimuth) * np.cos(elevation)
-            # z = distance * np.sin(elevation)
             radius = self.rng.uniform(params["min_radius"], params["max_radius"])
             
             obstacle_config = {
