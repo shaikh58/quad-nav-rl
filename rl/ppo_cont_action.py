@@ -84,7 +84,7 @@ class Args:
     """whether to use a planner"""
     planner_type: str = "straight_line"
     """the type of planner to use"""
-    env_radius: float = 15
+    env_radius: float = 20
     """the environment radius"""
     goal_threshold: float = 0.5
     """distance to goal for success"""
@@ -307,13 +307,14 @@ if __name__ == "__main__":
                 for k in range(args.num_envs):
                     if truncations[k] or terminations[k]:
                         if infos["termination_msg"][k] == "collision_obstacles":
-                            print("Collision with obstacles")
+                            # print("Collision with obstacles")
+                            pass
                         if infos["termination_msg"][k] == "success":
                             start_pos = envs.unwrapped.get_attr("init_qpos")[k][:3]
                             end_pos = infos["pos"][k]
                             target_pos = envs.unwrapped.get_attr("_target_location")[k]
                             env_success_ctrs[k] += 1
-                            print("Success!!!", "Start agent pos: ", start_pos, "End agent pos: ", end_pos, "Target pos: ", target_pos, "Success count: ", env_success_ctrs[k])
+                            # print("Success!!!", "Start agent pos: ", start_pos, "End agent pos: ", end_pos, "Target pos: ", target_pos, "Success count: ", env_success_ctrs[k])
                         # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
                         if "episode" in infos:
                             writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
@@ -430,10 +431,10 @@ if __name__ == "__main__":
                     writer.add_histogram(f'gradients/{name}/histogram', param.grad, global_step)
         print("Total training time:", time.time() - start_time)
         # save some videos (create an env, rollout, and capture the video)
-        all_advs = np.stack(all_advs)
-        env_success_ctrs = np.array(env_success_ctrs)
-        np.save(f"runs/{run_name}/all_advs.npy", all_advs)
-        np.save(f"runs/{run_name}/env_success_ctrs.npy", env_success_ctrs)
+        # all_advs = np.stack(all_advs)
+        # env_success_ctrs = np.array(env_success_ctrs)
+        # np.save(f"runs/{run_name}/all_advs.npy", all_advs)
+        # np.save(f"runs/{run_name}/env_success_ctrs.npy", env_success_ctrs)
 
     except KeyboardInterrupt:
         print("Training interrupted by user - saving model and running eval")

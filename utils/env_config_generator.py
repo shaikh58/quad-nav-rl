@@ -14,7 +14,7 @@ class EnvironmentConfigGenerator:
     
     def __init__(self, seed, **kwargs):
         self.kwargs = kwargs
-        self.env_radius = self.kwargs.get("env_radius", 15)
+        self.env_radius = self.kwargs.get("env_radius", 25)
         self.start_orientation = np.array([1, 0, 0, 0])
         self.start_vel = np.array([0, 0, 0, 0, 0, 0])
         # if user passes in start/goal locations, use them
