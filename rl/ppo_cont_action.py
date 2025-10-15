@@ -36,7 +36,7 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
+    save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
@@ -46,7 +46,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "envs/QuadNav-v0"
     """the id of the environment"""
-    total_timesteps: int = 1000000
+    total_timesteps: int = 10000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -461,23 +461,22 @@ if __name__ == "__main__":
         env_kwargs["obs_regen_eps"] = args.obs_regen_eps
 
         n_episodes = 5
-
-        # custom eval using exact same env as env of rank 0 (this is the env that has video capture during training)
-        envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference, except start position
-        [make_env(args.env_id, 0, False, 
-        run_name, args.gamma, args.seed, use_planner=args.use_planner, planner_type=args.planner_type,  
-         **env_kwargs
-        ) for i in range(1)]
-        )
-        obs, _ = envs.reset(seed=args.seed)
         # reset the env to set the start/goal pos according to randomizer
         for i in range(n_episodes):
+            seed_offset = 20*i + 5 # to get diff envs
+            # create a random env (random start/obstacles but fixed goal)
+            envs = gym.vector.AsyncVectorEnv(# NOTE: we don't randomize the env during inference, except start position
+            [make_env(args.env_id, 0, False, 
+            run_name, args.gamma, args.seed + seed_offset, use_planner=args.use_planner, planner_type=args.planner_type,  
+            **env_kwargs) for i in range(1)]
+            )
+            obs, _ = envs.reset(seed=args.seed + seed_offset)
             video = []
             over = False
             iters = 0
             while not over and iters < 1000: # manual termination to prevent infinite loop
                 with torch.no_grad():
-                    action = agent.actor_mean(torch.tensor(obs)) # deterministic action during inference
+                    action = agent.actor_mean(torch.tensor(obs, dtype=torch.float32)) # deterministic action during inference
                 obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
                 rgb_array = envs.render()
                 video.append(rgb_array)
@@ -485,8 +484,7 @@ if __name__ == "__main__":
                 over = terminated or truncated
             os.makedirs(video_path, exist_ok=True)
             imageio.mimsave(f"{video_path}/ep_{i}.mp4", np.array(video).squeeze(), fps=30)
-            obs, _ = envs.reset() # don't call with seed again as it changes rng state
-        envs.close()
+            envs.close()
 
         if args.upload_model:
             from cleanrl_utils.huggingface import push_to_hub
