@@ -47,9 +47,11 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         top_k_obstacles: int = 5,
         **kwargs,
     ):
+        self.obstacle_vec_size = 5
+        self.obs_dist_pad = 0
         self.observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(13 + 3 + 3*top_k_obstacles,), dtype=np.float64
-        ) # position (3), velocity (3), goal_relative (3), vecs_to_obstacles (3*top_k_obstacles)
+            low=-np.inf, high=np.inf, shape=(13 + 3 + self.obstacle_vec_size*top_k_obstacles,), dtype=np.float64
+        ) # position (3), velocity (3), goal_relative (3), vecs_to_obstacles (dx,dy,dz,radius,valid_flag)
         self.render_mode = kwargs.get("render_mode", "rgb_array")
 
         if xml_file is None:
@@ -145,7 +147,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         # qvel is (6,) (vx, vy, vz, wx, wy, wz)
         obs_size = self.data.qpos.size + self.data.qvel.size
         self.trajectory = None
-        self.obs_dist_pad = 1e5
+        
         self.set_start_location() 
         self.set_start_goal_geoms()
         self.set_env_radius()
@@ -213,7 +215,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                     min_arg = i
             dists_to_obstacles.append(min_dist)
             vec_to_obs = self.model.geom(f'rotor{min_arg+1}').pos - obstacle["position"]
-            vecs_to_obstacles.append(vec_to_obs)
+            # validity mask at the end of the vector is 1 if the obstacle is active, 0 otherwise
+            vec_to_obs_augmented = np.concatenate((vec_to_obs, [obstacle["radius"], 1]))
+            vecs_to_obstacles.append(vec_to_obs_augmented)
         return np.array(dists_to_obstacles), np.array(vecs_to_obstacles)
     
     def control_cost(self, action):
@@ -224,16 +228,16 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         position = self.data.qpos.flatten()
         velocity = self.data.qvel.flatten()
         goal_relative = self.data.qpos[:3] - self._target_location
-        observation = np.concatenate((position, velocity, goal_relative, 
-                            np.full(self._top_k_obstacles*3, self.obs_dist_pad)))
+        observation = np.concatenate((position, velocity, goal_relative,
+                            np.full(self._top_k_obstacles*self.obstacle_vec_size, self.obs_dist_pad)))
         if self._use_obstacles:
             obs_dists, vecs_to_obstacles = self.sdf_obstacle()
             inds = np.argsort(obs_dists)[:self._top_k_obstacles]
             obs_dists = obs_dists[inds]
             vecs_to_obstacles = vecs_to_obstacles[inds]
             vecs_to_obstacles = np.pad(vecs_to_obstacles.flatten(), 
-                                    (0, self._top_k_obstacles*3 - vecs_to_obstacles.shape[0]*3), 
-                                    constant_values=self.obs_dist_pad)
+                                    (0, self._top_k_obstacles*self.obstacle_vec_size - vecs_to_obstacles.shape[0]*self.obstacle_vec_size), 
+                                    constant_values=self.obs_dist_pad) # pad with radius, valid flag so obs_dist_pad must be 0
             observation = np.concatenate((position, velocity, goal_relative, vecs_to_obstacles))
         return observation
 

@@ -2,10 +2,11 @@
 
 This is a small applied research project to learn, apply, and demonstrate the use of reinforcement learning to create a controller for safe navigation of a simulated quadrotor in a 3D environment. This project uses the [Mujoco](https://mujoco.org/) physics engine to simulate the quadrotor, and uses Proximal Policy Optimization [(PPO)](https://arxiv.org/pdf/1707.06347), based on the [cleanRL implementation](https://github.com/vwxyzjn/cleanrl).
 
-Before we get into the details, let's take a look at some of the results. Currently, model is trained on a fixed start and goal location, and the quadrotor is able to navigate to the goal, and hover over it. 
+Before we get into the details, here are a couple of rollouts from the policy. Currently, the model is trained on a fixed start and goal location, and the quadrotor is able to navigate to the goal, and hover over it. 
 
-![Demo: Successful Target Hover with Sparse Obstacles](demo-videos/successful-target-hover-sparse-obstacles.gif)
-![Demo: RL Episode 5200 High Quality](demo-videos/rl-video-episode-5200-hq.gif)
+![Demo: 1](demo-videos/rl-video-episode-1600-300x300.gif)
+<!-- ![Demo: 2](demo-videos/rl-video-episode-5200-300x300-20sec.gif) -->
+![Demo: 3](demo-videos/rl-video-episode-2400-300x300.gif)
 
 ### Key features:
 1. Custom Gymnasium environment based on the Mujoco [Skydio X2 model](https://github.com/google-deepmind/mujoco_menagerie/tree/main/skydio_x2)

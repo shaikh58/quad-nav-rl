@@ -14,7 +14,8 @@ class EnvironmentConfigGenerator:
     
     def __init__(self, seed, **kwargs):
         self.kwargs = kwargs
-        self.env_radius = self.kwargs.get("env_radius", 25)
+        print(self.kwargs)
+        self.env_radius = self.kwargs.get("env_radius", 20)
         self.start_orientation = np.array([1, 0, 0, 0])
         self.start_vel = np.array([0, 0, 0, 0, 0, 0])
         # if user passes in start/goal locations, use them
@@ -89,7 +90,7 @@ class EnvironmentConfigGenerator:
             self.kwargs.get("obstacle_count_lb", 3),
             self.kwargs.get("obstacle_count_ub", 5) + 1
         )
-        params["min_radius"] = 0.05
+        params["min_radius"] = 0.1
         params["max_radius"] = 0.2
         return params
 
@@ -104,12 +105,12 @@ class EnvironmentConfigGenerator:
             # place the obstacle between start and target
             dir_vec = target_location - start_location
             dir_vec = dir_vec / np.linalg.norm(dir_vec)
-            # 0.3-0.7 to ensure obstacles are not too close to the start or target
+            # ensure obstacles are not too close to the start or target
             distance = self.obs_rng.uniform(0.25,0.75) * np.linalg.norm(target_location - start_location)
             # project the obstacle onto the line between start and target
             obstacle_pos = start_location + distance * dir_vec
             # sample the obstacle with a gaussian around the position on the straight line between start and target
-            noise = self.obs_rng.normal(0, 1.0, 3)
+            noise = self.obs_rng.normal(0, 0.8, 3)
             obstacle_pos = obstacle_pos + noise # 68% chance of being within scale units of the line
             radius = self.obs_rng.uniform(params["min_radius"], params["max_radius"])
             

@@ -36,7 +36,7 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = True
+    save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
     upload_model: bool = False
     """whether to upload the saved model to huggingface"""
@@ -46,7 +46,7 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "envs/QuadNav-v0"
     """the id of the environment"""
-    total_timesteps: int = 10000
+    total_timesteps: int = 100000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -86,7 +86,7 @@ class Args:
     """the type of planner to use"""
     env_radius: float = 20
     """the environment radius"""
-    goal_threshold: float = 0.5
+    goal_threshold: float = 1.0
     """distance to goal for success"""
     adaptive_goal_threshold: bool = True
     """whether to adapt the goal threshold based on the training stage"""
@@ -112,7 +112,7 @@ class Args:
     """the start location"""
     target_location: str = None
     """the target location"""
-    max_steps: int = 2000
+    max_steps: int = 800
     """the maximum number of steps per episode before truncation"""
     reset_noise_scale: float = 1e-1
     """the noise scale for the reset"""
@@ -122,6 +122,8 @@ class Args:
     """whether to regenerate obstacles at the end of each episode (w.p. obs_regen_eps)"""
     obs_regen_eps: float = 0.5
     """the probability with which to regenerate obstacles"""
+    top_k_obstacles: int = 5
+    """the number of closest obstacles to use for observation"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -241,13 +243,14 @@ if __name__ == "__main__":
         "use_obstacles": args.use_obstacles,
         "regen_obstacles": args.regen_obstacles,
         "obs_regen_eps": args.obs_regen_eps,
+        "top_k_obstacles": args.top_k_obstacles,
     } # note the target and start location are set in the env randomizer but can be overridden by the user
     # for negative rewards (w./only positive at goal), we dont want to discount the reward
     if args.progress_type == "negative": 
         args.gamma = 1
     # NOTE: the seed is the same for all envs to ensure same start/goal locations chosen by randomizer
     # the seed will only be args.seed+i for having e.g. different start locations in each env
-    envs = gym.vector.AsyncVectorEnv( # TODO: args.seed + i
+    envs = gym.vector.AsyncVectorEnv( # TODO: args.seed + i; see reset() below as well
         [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed + i, use_planner=args.use_planner, planner_type=args.planner_type, **env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
@@ -273,8 +276,10 @@ if __name__ == "__main__":
     for i in range(args.num_envs):
         print(f"Env: {i}", "Start: ", envs.unwrapped.get_attr("init_qpos")[i][:3], "Target: ", envs.unwrapped.get_attr("_target_location")[i], 
         "Env radius: ", envs.unwrapped.get_attr("model")[i].stat.extent, 
-        "Target distance from agent start pos: ", np.linalg.norm(envs.unwrapped.get_attr("_target_location")[i] - envs.unwrapped.get_attr("init_qpos")[i][:3]),
-        "Number of obstacles: ", len(envs.unwrapped.get_attr("obstacle_metadata")[i]))
+        "Target distance from agent start pos: ", np.linalg.norm(envs.unwrapped.get_attr("_target_location")[i] - envs.unwrapped.get_attr("init_qpos")[i][:3]),)
+        if args.use_obstacles: 
+            print("Number of obstacles: ", len(envs.unwrapped.get_attr("obstacle_metadata")[i]))
+    
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
     try:
@@ -314,7 +319,7 @@ if __name__ == "__main__":
                             end_pos = infos["pos"][k]
                             target_pos = envs.unwrapped.get_attr("_target_location")[k]
                             env_success_ctrs[k] += 1
-                            # print("Success!!!", "Start agent pos: ", start_pos, "End agent pos: ", end_pos, "Target pos: ", target_pos, "Success count: ", env_success_ctrs[k])
+                            print("Success!!!", "Start agent pos: ", start_pos, "End agent pos: ", end_pos, "Target pos: ", target_pos, "Success count: ", env_success_ctrs[k])
                         # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
                         if "episode" in infos:
                             writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
@@ -455,18 +460,19 @@ if __name__ == "__main__":
         env_kwargs["start_location"] = None
         env_kwargs["target_location"] = target_location
         env_kwargs["radius"] = radius
-        env_kwargs["goal_threshold"] = args.goal_threshold
+        env_kwargs["goal_threshold"] = 0.2 # hardcoded for eval
         env_kwargs["mode"] = "eval"
         env_kwargs["use_obstacles"] = args.use_obstacles
         env_kwargs["regen_obstacles"] = args.regen_obstacles
         env_kwargs["obs_regen_eps"] = args.obs_regen_eps
+        agent.eval()
 
         n_episodes = 5
         # reset the env to set the start/goal pos according to randomizer
         for i in range(n_episodes):
-            seed_offset = 20*i + 5 # to get diff envs
+            seed_offset = 0 # 20*i + 5 # to get diff envs
             # create a random env (random start/obstacles but fixed goal)
-            envs = gym.vector.AsyncVectorEnv(# NOTE: we don't randomize the env during inference, except start position
+            envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference, except start position
             [make_env(args.env_id, 0, False, 
             run_name, args.gamma, args.seed + seed_offset, use_planner=args.use_planner, planner_type=args.planner_type,  
             **env_kwargs) for i in range(1)]

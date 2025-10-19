@@ -39,7 +39,7 @@ def make_env(env_id, idx, capture_video, run_name, gamma, seed, use_planner=None
         env = gym.wrappers.NormalizeReward(env, gamma=gamma)
         # env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
         # no need to set truncations in env.step() as TimeLimit wrapper handles it
-        max_steps = kwargs.get("max_steps", 1500)
+        max_steps = kwargs.get("max_steps", 500)
         env = gym.wrappers.TimeLimit(env, max_episode_steps=max_steps)
         return env
 
