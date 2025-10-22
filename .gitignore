@@ -14,6 +14,8 @@ wheels/
 /runs
 /sb3-runs
 /videos
+/videos/envs 
+/videos/evals
 .DS_Store
 *.ipynb
 MUJOCO_LOG.TXT

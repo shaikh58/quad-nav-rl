@@ -46,11 +46,11 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "envs/QuadNav-v0"
     """the id of the environment"""
-    total_timesteps: int = 100000
+    total_timesteps: int = 300000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 2
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -84,9 +84,9 @@ class Args:
     """whether to use a planner"""
     planner_type: str = "straight_line"
     """the type of planner to use"""
-    env_radius: float = 20
+    env_radius: float = 25
     """the environment radius"""
-    goal_threshold: float = 1.0
+    goal_threshold: float = 1.5
     """distance to goal for success"""
     adaptive_goal_threshold: bool = True
     """whether to adapt the goal threshold based on the training stage"""
@@ -96,17 +96,17 @@ class Args:
     """minimum height above ground before ground collision"""
     ctrl_cost_weight: float = 0.1
     """control cost penalty for reward"""
-    progress_weight: float = 0.1
+    progress_weight: float = 50
     """weight for progress term in reward"""
-    body_rate_weight: float = 0.1
+    body_rate_weight: float = 0.5
     """weight for body rate penalty in reward"""
-    collision_ground_weight: float = 1
+    collision_ground_weight: float = 40
     """weight for ground collision penalty in reward"""
-    collision_obstacles_weight: float = 1
+    collision_obstacles_weight: float = 40
     """weight for obstacle collision penalty in reward"""
-    out_of_bounds_weight: float = 1
+    out_of_bounds_weight: float = 40
     """weight for out of bounds penalty in reward"""
-    success_weight: float = 10
+    success_weight: float = 100
     """weight for success term in reward"""
     start_location: str = None
     """the start location"""
@@ -124,6 +124,10 @@ class Args:
     """the probability with which to regenerate obstacles"""
     top_k_obstacles: int = 5
     """the number of closest obstacles to use for observation"""
+    goal_reduce_frac: float = 0.99
+    """the fraction by which to reduce the goal threshold"""
+    env_removal_start_iter: int = 10000
+    """the iteration at which to start removing envs for curriculum"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -266,7 +270,10 @@ if __name__ == "__main__":
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
     values = torch.zeros((args.num_steps, args.num_envs)).to(device)
     all_advs = []
-    env_success_ctrs = [0] * args.num_envs
+    env_success_ctrs = np.zeros(args.num_envs)
+    prev_success_ctr_vals = np.zeros(args.num_envs)
+    goal_thresholds = [args.goal_threshold] * args.num_envs
+    idx_to_remove = None
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -318,17 +325,28 @@ if __name__ == "__main__":
                             start_pos = envs.unwrapped.get_attr("init_qpos")[k][:3]
                             end_pos = infos["pos"][k]
                             target_pos = envs.unwrapped.get_attr("_target_location")[k]
-                            env_success_ctrs[k] += 1
-                            print("Success!!!", "Start agent pos: ", start_pos, "End agent pos: ", end_pos, "Target pos: ", target_pos, "Success count: ", env_success_ctrs[k])
+                            if idx_to_remove != k:
+                                # only count as a success if that env is 'active' i.e. not filtered out from the learning process
+                                env_success_ctrs[k] += 1
+                                print(f"Success in env {k}!!! Start agent pos: {start_pos}, End agent pos: {end_pos}, Target pos: {target_pos}, Success count: {env_success_ctrs[k]}")
                         # print(f"global_step={global_step}, episodic_return={mean_return}, episodic_length={mean_length}")
                         if "episode" in infos:
                             writer.add_scalar("charts/episodic_return", infos["episode"]["r"][k], global_step)
                             writer.add_scalar("charts/episodic_length", infos["episode"]["l"][k], global_step)
             
             if args.adaptive_goal_threshold:
-                frac = max(1.0 - (iteration - 1.0) / (args.num_iterations), 0.2) # TODO: hardcoded; don't want to make the goal too small
-                envs.set_attr("_goal_threshold", frac * args.goal_threshold) # set for all envs
-                print("Reducing goal threshold to: ", frac * args.goal_threshold)
+                for k in range(args.num_envs):
+                    if np.isnan(env_success_ctrs[k]):
+                        continue
+                    if prev_success_ctr_vals[k] < env_success_ctrs[k] and idx_to_remove != k:
+                        # if there has been at least 1 success in this env, reduce the goal threshold
+                        # frac = max(1.0 - (iteration - 1.0) / (args.num_iterations), 0.2)
+                        goal_thresholds[k] *= args.goal_reduce_frac
+                        # passing in a list updates each env separately
+                        print(f"goal_thresholds: {goal_thresholds}")
+                        envs.set_attr("_goal_threshold", goal_thresholds) # exponentially decay the goal threshold
+                        print(f"Reducing goal threshold for env {k} to: {goal_thresholds[k]}")
+                        prev_success_ctr_vals[k] = env_success_ctrs[k]
                 
             # bootstrap value if not done
             with torch.no_grad():
@@ -348,22 +366,47 @@ if __name__ == "__main__":
                     advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
                 returns = advantages + values
 
+            # TODO: to sample 'out' some env's data i.e. for curriculum, do it here
+            # identify which env to filter out by looking at env_success_ctrs
+            # simply downweight the likelihood of sampling from this env with high success ctrs
+            pct_successes = env_success_ctrs / env_success_ctrs.sum()
+            print(f"pct_successes: {pct_successes}")
+            print(f"num_iterations: {iteration}")
+            # warm start - only remove envs after a certain number of iterations
+            if np.isnan(pct_successes).any() or iteration < args.env_removal_start_iter:
+                idxs_to_keep = np.arange(args.num_envs)
+                idx_to_remove = None
+            else:
+                idxs = np.argsort(pct_successes)
+                idxs_to_keep = idxs[:-1]
+                idx_to_remove = idxs[-1]
+                print(f"Removing env with index: {idx_to_remove}")
+            
+            values_to_keep = values[:,idxs_to_keep]
+            obs_to_keep = obs[:,idxs_to_keep,:]
+            advantages_to_keep = advantages[:,idxs_to_keep]
+            returns_to_keep = returns[:,idxs_to_keep]
+            logprobs_to_keep = logprobs[:,idxs_to_keep]
+            actions_to_keep = actions[:,idxs_to_keep]
+
             # flatten the batch
-            b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
-            b_logprobs = logprobs.reshape(-1)
-            b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
-            b_advantages = advantages.reshape(-1)
+            # TODO: to undo curriculum, just remove _to_keep from the variables
+            b_obs = obs_to_keep.reshape((-1,) + envs.single_observation_space.shape)
+            b_logprobs = logprobs_to_keep.reshape(-1)
+            b_actions = actions_to_keep.reshape((-1,) + envs.single_action_space.shape)
+            b_advantages = advantages_to_keep.reshape(-1)
             # save advs for debugging
-            all_advs.append(advantages)
-            b_returns = returns.reshape(-1)
-            b_values = values.reshape(-1)
+            all_advs.append(advantages) # keep all advs for debugging
+            b_returns = returns_to_keep.reshape(-1)
+            b_values = values_to_keep.reshape(-1)
 
             # Optimizing the policy and value network
-            b_inds = np.arange(args.batch_size)
+            batch_size_to_keep = values_to_keep.shape[0]
+            b_inds = np.arange(batch_size_to_keep) # originally args.batch_size
             clipfracs = []
             for epoch in range(args.update_epochs):
                 np.random.shuffle(b_inds)
-                for start in range(0, args.batch_size, args.minibatch_size):
+                for start in range(0, batch_size_to_keep, args.minibatch_size):
                     end = start + args.minibatch_size
                     mb_inds = b_inds[start:end]
                     # mb_inds are the minibatch indices i.e. batch split into equal sized chunks
@@ -436,10 +479,9 @@ if __name__ == "__main__":
                     writer.add_histogram(f'gradients/{name}/histogram', param.grad, global_step)
         print("Total training time:", time.time() - start_time)
         # save some videos (create an env, rollout, and capture the video)
-        # all_advs = np.stack(all_advs)
-        # env_success_ctrs = np.array(env_success_ctrs)
-        # np.save(f"runs/{run_name}/all_advs.npy", all_advs)
-        # np.save(f"runs/{run_name}/env_success_ctrs.npy", env_success_ctrs)
+        all_advs = np.stack(all_advs)
+        np.save(f"runs/{run_name}/all_advs.npy", all_advs)
+        np.save(f"runs/{run_name}/env_success_ctrs.npy", env_success_ctrs)
 
     except KeyboardInterrupt:
         print("Training interrupted by user - saving model and running eval")
