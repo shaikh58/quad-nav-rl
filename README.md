@@ -1,8 +1,8 @@
 ## Reinforcement learning approach to safe 3D autonomous navigation of a quadrotor
 
-This is a small applied research project to learn, apply, and demonstrate the use of reinforcement learning to create a controller for safe navigation of a simulated quadrotor in a 3D environment. This project uses the [Mujoco](https://mujoco.org/) physics engine to simulate the quadrotor, and uses Proximal Policy Optimization [(PPO)](https://arxiv.org/pdf/1707.06347), based on the [cleanRL implementation](https://github.com/vwxyzjn/cleanrl).
+This is a small applied research/engineering project to create a reinforcement-learning-based controller for safe navigation of a Skydio X2 quadrotor in a simulated 3D environment. This project uses the [Mujoco](https://mujoco.org/) physics engine to simulate the quadrotor, and uses Proximal Policy Optimization [(PPO)](https://arxiv.org/pdf/1707.06347), based on the [cleanRL implementation](https://github.com/vwxyzjn/cleanrl).
 
-Before we get into the details, here are a couple of rollouts from the policy. Currently, the model is trained on a fixed start and goal location, and the quadrotor is able to navigate to the goal, and hover over it. 
+Below are a couple of rollouts from the policy. Currently, the model is trained on a fixed start and goal location with obstacles in the path between start and goal, and the quadrotor is able to avoid the obstacles, navigate to the goal, and hover near it. 
 
 ![Demo: 1](demo-videos/rl-video-episode-1600-300x300.gif)
 <!-- ![Demo: 2](demo-videos/rl-video-episode-5200-300x300-20sec.gif) -->
@@ -11,11 +11,10 @@ Before we get into the details, here are a couple of rollouts from the policy. C
 ### Key features:
 1. Custom Gymnasium environment based on the Mujoco [Skydio X2 model](https://github.com/google-deepmind/mujoco_menagerie/tree/main/skydio_x2)
 2. Parallel environments using AsyncVectorEnv for more efficient data collection
-3. Train using [PPO](https://github.com/vwxyzjn/cleanrl)
+3. Train using lightly modified [PPO](https://github.com/vwxyzjn/cleanrl) implementation from CleanRL
 4. Dynamic environment generation during episode rollouts using MjSpec to support generalizability
-5. (In progress) Obstacle avoidance with variable number of randomly positioned obstacles
-6. (Next) Start and goal location generalization
-7. Added Euler-Lagrange [quadrotor dynamics](https://vnav.mit.edu/material/06-Control1-notes.pdf) in canonical form $\dot x = f(x) + g(x)u$ with neural-net based residual model to account for differences in analytical and Mujoco forward dynamics, as well as incorporating Mujoco [inertia-based aerodynamics modelling](https://mujoco.readthedocs.io/en/latest/computation/fluid.html#flinertia) of drag forces and torques into the analytical equations: $\dot x = f(x) + f_{residual}(x) + g(x, \tau_{d}, f_d)u$. This supports future work on model based RL.
+6. (In progress) Obstacle avoidance with variable number of randomly positioned obstacles and start locations. Experimenting with curriculum learning to facilitate generalizability
+8. Added Euler-Lagrange [quadrotor dynamics](https://vnav.mit.edu/material/06-Control1-notes.pdf) in canonical form $\dot x = f(x) + g(x)u$ with neural-net based residual model to account for differences in analytical and Mujoco forward dynamics, as well as incorporating Mujoco [inertia-based aerodynamics modelling](https://mujoco.readthedocs.io/en/latest/computation/fluid.html#flinertia) of drag forces and torques into the analytical equations: $\dot x = f(x) + f_{residual}(x) + g(x, \tau_{d}, f_d)u$. This supports future work on model based RL.
 
 
 ### Details
