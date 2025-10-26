@@ -112,7 +112,7 @@ class Args:
     """the start location"""
     target_location: str = None
     """the target location"""
-    max_steps: int = 800
+    max_steps: int = 600
     """the maximum number of steps per episode before truncation"""
     reset_noise_scale: float = 1e-1
     """the noise scale for the reset"""
@@ -373,7 +373,7 @@ if __name__ == "__main__":
             print(f"pct_successes: {pct_successes}")
             print(f"num_iterations: {iteration}")
             # warm start - only remove envs after a certain number of iterations
-            if np.isnan(pct_successes).any() or iteration < args.env_removal_start_iter:
+            if np.isnan(pct_successes).any() or iteration < args.env_removal_start_iter or args.num_envs == 1:
                 idxs_to_keep = np.arange(args.num_envs)
                 idx_to_remove = None
             else:
