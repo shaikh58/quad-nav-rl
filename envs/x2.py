@@ -5,8 +5,8 @@ from gymnasium import utils
 from gymnasium.spaces import Box
 import xml.etree.ElementTree as ET
 import os
-from utils.env_utils import multiply_quaternions
 import mujoco
+from utils.env_utils import multiply_quaternions
 from utils.env_config_generator import EnvironmentConfigGenerator
 from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 
@@ -45,13 +45,15 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         regen_obstacles: bool = False,
         obs_regen_eps: float = 0.8, # prob with which to resample obstacles after each episode,
         top_k_obstacles: int = 5,
+        grid_size: int = 10,
+        grid_res: float = 0.5,
         **kwargs,
     ):
         self.obstacle_vec_size = 5
         self.obs_dist_pad = 0
         self.observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(13 + 3 + self.obstacle_vec_size*top_k_obstacles,), dtype=np.float64
-        ) # position (3), velocity (3), goal_relative (3), vecs_to_obstacles (dx,dy,dz,radius,valid_flag)
+            low=-np.inf, high=np.inf, shape=(16 + grid_size**3,), dtype=np.float64
+        ) # position (3), orientation (4), velocity (3), goal_relative (3), obstacle representation (grid_size^3)
         self.render_mode = kwargs.get("render_mode", "rgb_array")
 
         if xml_file is None:
@@ -140,6 +142,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self._obs_regen_eps = obs_regen_eps
         self._regen_obstacles = regen_obstacles
         self._top_k_obstacles = top_k_obstacles
+        self.grid_size = grid_size
+        self.grid_res = grid_res
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
         self.hover_thrust = self.model.keyframe('hover').ctrl.copy()
@@ -223,22 +227,42 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
     def control_cost(self, action):
         control_cost = self._ctrl_cost_weight * np.sum(np.square(action))
         return control_cost
+    
+    def make_voxel_grid(self, position):
+        voxel_grid = np.zeros((self.grid_size, self.grid_size, self.grid_size), dtype=np.float32)
+        grid_half_size = (self.grid_size // 2) * self.grid_res
+        grid_center = np.array([self.grid_size // 2, self.grid_size // 2, self.grid_size // 2])
+        p = position[:3]
+        q = position[3:7]
+        for obstacle in self.obstacle_metadata:
+            pos = obstacle["position"]
+            radius = obstacle["radius"]
+            # Check if obstacle's position is within the cubic voxel grid centered at the agent's position
+            if not np.all(np.abs(pos - p) < grid_half_size):
+                continue
+            # if within the grid, rotate the grid to be in body frame
+            q_inverse = np.array([q[0], -q[1], -q[2], -q[3]])
+            qv = multiply_quaternions(q_inverse, np.concatenate([[1], pos - p]))
+            obs_vec_body_frame = multiply_quaternions(qv, q)[1:]
+            # this might fall outside the grid since center is actually just
+            ## off the true center of the grid
+            grid_obs_coord = obs_vec_body_frame / self.grid_res # relative vec from agent i.e. center of grid
+            # coordinate convention follows right hand rule, with positive z being above the agent's position
+            # i.e. grid[z, y, x] = occupancy(x, y, z). Each slice of grid moves down the z axis
+            x = np.clip(grid_center[0] + grid_obs_coord[0], 0, self.grid_size - 1)
+            y = np.clip(grid_center[1] + grid_obs_coord[1], 0, self.grid_size - 1)
+            z = np.clip(grid_center[2] + grid_obs_coord[2], 0, self.grid_size - 1)
+            voxel_grid[int(z), int(y), int(x)] = 1 # TODO: loses precision since int() rounds down; can interpolate in multiple grid cells when using finer grid
+            # TODO: test this with a known value i.e. obs at 1,1,1, and orientation at 45 deg so it should be at 0,0,1
+        return voxel_grid
 
     def _get_obs(self):
         position = self.data.qpos.flatten()
         velocity = self.data.qvel.flatten()
         goal_relative = self.data.qpos[:3] - self._target_location
+        voxel_grid = self.make_voxel_grid(position)
         observation = np.concatenate((position, velocity, goal_relative,
-                            np.full(self._top_k_obstacles*self.obstacle_vec_size, self.obs_dist_pad)))
-        if self._use_obstacles:
-            obs_dists, vecs_to_obstacles = self.sdf_obstacle()
-            inds = np.argsort(obs_dists)[:self._top_k_obstacles]
-            obs_dists = obs_dists[inds]
-            vecs_to_obstacles = vecs_to_obstacles[inds]
-            vecs_to_obstacles = np.pad(vecs_to_obstacles.flatten(), 
-                                    (0, self._top_k_obstacles*self.obstacle_vec_size - vecs_to_obstacles.shape[0]*self.obstacle_vec_size), 
-                                    constant_values=self.obs_dist_pad) # pad with radius, valid flag so obs_dist_pad must be 0
-            observation = np.concatenate((position, velocity, goal_relative, vecs_to_obstacles))
+                            voxel_grid.flatten()))
         return observation
 
     def set_trajectory(self, trajectory, info):

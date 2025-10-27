@@ -50,7 +50,7 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 2
+    num_envs: int = 1
     """the number of parallel game environments"""
     num_steps: int = 2048
     """the number of steps to run in each environment per policy rollout"""
@@ -128,6 +128,10 @@ class Args:
     """the fraction by which to reduce the goal threshold"""
     env_removal_start_iter: int = 10000
     """the iteration at which to start removing envs for curriculum"""
+    grid_size: int = 10
+    """size of the voxel grid around the agent"""
+    grid_res: float = 1
+    """resolution of the voxel grid"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -156,19 +160,30 @@ def set_global_seed(seed):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
+        self.conv3d = nn.Sequential(
+            nn.Conv3d(1, 8, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv3d(8, 16, kernel_size=3, stride=2, padding=1),
+            nn.ReLU()
+        )
+        self.conv2d = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveMaxPool2d((1, 1))
+        )
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(32 + 16, 128)), # 32 is output of cnn, 13 is the agent pos/vel
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(128, 128)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            layer_init(nn.Linear(128, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            layer_init(nn.Linear(32 + 16, 128)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
+            layer_init(nn.Linear(128, 128)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(128, np.prod(envs.single_action_space.shape)), std=0.01),
         )
         # Initialize final layer bias to output hover thrust
         with torch.no_grad():
@@ -180,18 +195,32 @@ class Agent(nn.Module):
             # scaled_hover_thrust = -1 + 2 * (hover_thrust - -1) / 2
             # self.actor_mean[-1].bias.fill_(scaled_hover_thrust)
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        self.grid_size = envs.unwrapped.get_attr("grid_size")[0]
+
+    def obs_encoder(self, x):
+        voxel_grids = x[:,16:].reshape((-1, self.grid_size, self.grid_size, self.grid_size)).unsqueeze(1)
+        conv_out = self.conv3d(voxel_grids) # B, C, D, H, W
+        conv_out = torch.mean(conv_out, dim=2) # collapse the depth dimension
+        conv_out = self.conv2d(conv_out)
+        conv_out = conv_out.squeeze()
+        if conv_out.dim() == 1:
+            conv_out = conv_out.unsqueeze(0)
+        out = torch.cat([x[:,:16], conv_out], dim=1)
+        return out
 
     def get_value(self, x):
-        return self.critic(x)
+        output = self.obs_encoder(x)
+        return self.critic(output)
 
     def get_action_and_value(self, x, action=None):
-        action_mean = self.actor_mean(x)
+        output = self.obs_encoder(x)
+        action_mean = self.actor_mean(output)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(output)
 
 
 if __name__ == "__main__":
@@ -248,6 +277,8 @@ if __name__ == "__main__":
         "regen_obstacles": args.regen_obstacles,
         "obs_regen_eps": args.obs_regen_eps,
         "top_k_obstacles": args.top_k_obstacles,
+        "grid_size": args.grid_size,
+        "grid_res": args.grid_res,
     } # note the target and start location are set in the env randomizer but can be overridden by the user
     # for negative rewards (w./only positive at goal), we dont want to discount the reward
     if args.progress_type == "negative": 
