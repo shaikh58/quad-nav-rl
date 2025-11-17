@@ -160,8 +160,9 @@ def set_global_seed(seed):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
+        self.channels = 2
         self.conv3d = nn.Sequential(
-            nn.Conv3d(1, 8, kernel_size=3, stride=1, padding=1),
+            nn.Conv3d(self.channels, 8, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Conv3d(8, 16, kernel_size=3, stride=2, padding=1),
             nn.ReLU()
@@ -179,7 +180,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(128, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(32 + 16, 128)),
+            layer_init(nn.Linear(32 + 16, 128)), # conv output has shape 32, 16 is the agent pos/vel
             nn.Tanh(),
             layer_init(nn.Linear(128, 128)),
             nn.Tanh(),
@@ -198,13 +199,14 @@ class Agent(nn.Module):
         self.grid_size = envs.unwrapped.get_attr("grid_size")[0]
 
     def obs_encoder(self, x):
-        voxel_grids = x[:,16:].reshape((-1, self.grid_size, self.grid_size, self.grid_size)).unsqueeze(1)
+        voxel_grids = x[:,16:].reshape((-1, self.channels, self.grid_size, self.grid_size, self.grid_size))
         conv_out = self.conv3d(voxel_grids) # B, C, D, H, W
         conv_out = torch.mean(conv_out, dim=2) # collapse the depth dimension
         conv_out = self.conv2d(conv_out)
         conv_out = conv_out.squeeze()
         if conv_out.dim() == 1:
             conv_out = conv_out.unsqueeze(0)
+        # TODO: experiment with MLP to fuse state w./ obs encoding
         out = torch.cat([x[:,:16], conv_out], dim=1)
         return out
 
@@ -250,7 +252,7 @@ if __name__ == "__main__":
     set_global_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
+    print(f"Using device: {device}")
     # env setup
     target_location = [float(y) for x in args.target_location.split(",") for y in x if y.isdigit()] if args.target_location is not None else None
     start_location = [float(y) for x in args.start_location.split(",") for y in x if y.isdigit()] if args.start_location is not None else None
@@ -556,7 +558,8 @@ if __name__ == "__main__":
             iters = 0
             while not over and iters < 1000: # manual termination to prevent infinite loop
                 with torch.no_grad():
-                    action = agent.actor_mean(torch.tensor(obs, dtype=torch.float32)) # deterministic action during inference
+                    obs_encoded = agent.obs_encoder(torch.tensor(obs))
+                    action = agent.actor_mean(obs_encoded) # deterministic action during inference
                 obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
                 rgb_array = envs.render()
                 video.append(rgb_array)

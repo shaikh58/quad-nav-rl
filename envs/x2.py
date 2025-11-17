@@ -47,12 +47,13 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         top_k_obstacles: int = 5,
         grid_size: int = 10,
         grid_res: float = 0.5,
+        goal_blob_std: float = 0.5,
         **kwargs,
     ):
         self.obstacle_vec_size = 5
         self.obs_dist_pad = 0
         self.observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(16 + grid_size**3,), dtype=np.float64
+            low=-np.inf, high=np.inf, shape=(16 + 2*grid_size**3,), dtype=np.float64
         ) # position (3), orientation (4), velocity (3), goal_relative (3), obstacle representation (grid_size^3)
         self.render_mode = kwargs.get("render_mode", "rgb_array")
 
@@ -93,7 +94,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self.model.vis.global_.offwidth = self.width
         self.model.vis.global_.offheight = self.height
         self.data = mujoco.MjData(self.model)
-
+        
         self._use_obstacles = use_obstacles
         if self._use_obstacles:
             # generate obstacles at the beginning; possibly regenerate after each episode
@@ -122,6 +123,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             )
         # distance threshold to target location for success
         self._goal_threshold = goal_threshold
+        self._goal_blob_std = goal_blob_std
         # minimum required height above ground
         self._min_height = min_height
 
@@ -227,13 +229,140 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
     def control_cost(self, action):
         control_cost = self._ctrl_cost_weight * np.sum(np.square(action))
         return control_cost
+
+    def dda_voxel_traversal_to_goal(self, start_grid, goal_position_grid, max_steps):
+        """
+        3D DDA voxel grid traversal from start toward goal.
+        Stops when reaching the goal voxel OR leaving the grid.
+        
+        Args:
+            start_grid: Starting position in grid coordinates (z, y, x)
+            goal_position_grid: Goal position in grid coordinates (z, y, x) - ABSOLUTE position, not relative
+            max_steps: Maximum number of voxels to traverse
+        
+        Returns:
+            Final voxel position (z, y, x) where ray stopped
+        """
+        # Direction from start to goal
+        direction_grid = goal_position_grid - start_grid
+        goal_voxel = np.floor(goal_position_grid).astype(int)
+        current_voxel = np.floor(start_grid).astype(int)
+        direction_normalized = direction_grid / np.linalg.norm(direction_grid)
+        # Step direction for each axis (+1 or -1)
+        step = np.sign(direction_normalized).astype(int)
+        
+        # tDelta: how far along the ray we must move (in units of t) to cross one voxel boundary
+        tDelta = np.zeros(3)
+        for i in range(3):
+            if direction_normalized[i] != 0:
+                tDelta[i] = abs(1.0 / direction_normalized[i])
+            else:
+                tDelta[i] = float('inf')
+        
+        # tMax: how far along the ray we must move to reach the next voxel boundary on each axis
+        tMax = np.zeros(3)
+        for i in range(3):
+            if direction_normalized[i] > 0:
+                tMax[i] = (np.ceil(start_grid[i]) - start_grid[i]) * tDelta[i]
+            elif direction_normalized[i] < 0:
+                tMax[i] = (start_grid[i] - np.floor(start_grid[i])) * tDelta[i]
+            else:
+                tMax[i] = float('inf')
+        
+        # Handle case where we start exactly on a boundary i.e. at the grid center
+        for i in range(3):
+            if tMax[i] == 0:
+                tMax[i] = tDelta[i]
+        
+        for _ in range(max_steps):
+            # Check if current voxel is out of bounds
+            if (current_voxel < 0).any() or (current_voxel >= self.grid_size).any():
+                # if oob, we want to project goal onto closest grid face anyway
+                return np.clip(current_voxel, 0, self.grid_size - 1)
+            # Check if we've reached the goal voxel; kept separate for easier debugging
+            if np.array_equal(current_voxel, goal_voxel):
+                # print("Reached goal voxel: ", current_voxel)
+                return current_voxel
+            
+            # Find which axis to step on (the one with smallest tMax)
+            axis = np.argmin(tMax)
+            
+            # Step to next voxel on that axis
+            current_voxel[axis] += step[axis]
+            tMax[axis] += tDelta[axis]
+        
+        # Max steps reached, return current position
+        return np.clip(current_voxel, 0, self.grid_size - 1)
     
+    def fill_2d_gaussian_blob(self, voxel_grid, voxel, axis):
+        """
+        Fill in a 2D Gaussian blob around the given voxel.
+        """
+        zc, yc, xc = voxel
+        if axis == "z":
+            X, Y = np.meshgrid(np.arange(0, self.grid_size), np.arange(0, self.grid_size))
+            dx = (X - xc) * self.grid_res
+            dy = (Y - yc) * self.grid_res
+            kernel = np.exp(-(dx**2 + dy**2) / (2 * self._goal_blob_std**2))
+            voxel_grid[1, zc, :, :] = kernel
+        elif axis == "y":
+            X, Z = np.meshgrid(np.arange(0, self.grid_size), np.arange(0, self.grid_size))
+            dx = (X - xc) * self.grid_res
+            dz = (Z - zc) * self.grid_res
+            kernel = np.exp(-(dx**2 + dz**2) / (2 * self._goal_blob_std**2))
+            voxel_grid[1, :, yc, :] = kernel
+        elif axis == "x":
+            Y, Z = np.meshgrid(np.arange(0, self.grid_size), np.arange(0, self.grid_size))
+            dy = (Y - yc) * self.grid_res
+            dz = (Z - zc) * self.grid_res
+            kernel = np.exp(-(dy**2 + dz**2) / (2 * self._goal_blob_std**2))
+            voxel_grid[1, :, :, xc] = kernel
+        else:
+            raise ValueError(f"Invalid axis: {axis}")
+        
+        return voxel_grid
+
+    def fill_3d_gaussian_blob(self, voxel_grid, voxel):
+        """
+        Fill in a 3D Gaussian blob around the given voxel.
+        """
+        zc, yc, xc = voxel
+        Z, Y, X = np.meshgrid(np.arange(0, self.grid_size), np.arange(0, self.grid_size), np.arange(0, self.grid_size))
+        dx = (X - xc) * self.grid_res
+        dy = (Y - yc) * self.grid_res
+        dz = (Z - zc) * self.grid_res
+        kernel = np.exp(-(dx**2 + dy**2 + dz**2) / (2 * self._goal_blob_std**2))
+        voxel_grid[1, :, :, :] = kernel
+        return voxel_grid
+
+    def fill_gaussian_blob(self, voxel_grid, voxel, p, q, q_inverse):
+        """
+        Fill in a Gaussian blob around the given voxel. If the goal is within the grid, fill in a 3d gaussian blob.
+        Otherwise, fill in a 2d gaussian blob on the grid face.
+        """
+        zc, yc, xc = voxel
+        if zc == 0 or zc == self.grid_size - 1 or yc == 0 or yc == self.grid_size - 1 or xc == 0 or xc == self.grid_size - 1:
+            # 2d gaussian on the grid face
+            if zc == 0 or zc == self.grid_size - 1: # top or bottom face
+                voxel_grid = self.fill_2d_gaussian_blob(voxel_grid, voxel, "z")
+            elif yc == 0 or yc == self.grid_size - 1: # front or back face
+                voxel_grid = self.fill_2d_gaussian_blob(voxel_grid, voxel, "y")
+            elif xc == 0 or xc == self.grid_size - 1: # left or right face
+                voxel_grid = self.fill_2d_gaussian_blob(voxel_grid, voxel, "x")
+        else:
+            # 3d gaussian in the grid
+            # print("Goal in grid: ", voxel)
+            voxel_grid = self.fill_3d_gaussian_blob(voxel_grid, voxel)
+        return voxel_grid
+
     def make_voxel_grid(self, position):
-        voxel_grid = np.zeros((self.grid_size, self.grid_size, self.grid_size), dtype=np.float32)
+        # first channel is for obstacles, second channel is for goal
+        voxel_grid = np.zeros((2, self.grid_size, self.grid_size, self.grid_size))
         grid_half_size = (self.grid_size // 2) * self.grid_res
         grid_center = np.array([self.grid_size // 2, self.grid_size // 2, self.grid_size // 2])
         p = position[:3]
         q = position[3:7]
+        q_inverse = np.array([q[0], -q[1], -q[2], -q[3]])
         for obstacle in self.obstacle_metadata:
             pos = obstacle["position"]
             radius = obstacle["radius"]
@@ -241,19 +370,40 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             if not np.all(np.abs(pos - p) < grid_half_size):
                 continue
             # if within the grid, rotate the grid to be in body frame
-            q_inverse = np.array([q[0], -q[1], -q[2], -q[3]])
             qv = multiply_quaternions(q_inverse, np.concatenate([[1], pos - p]))
             obs_vec_body_frame = multiply_quaternions(qv, q)[1:]
             # this might fall outside the grid since center is actually just
             ## off the true center of the grid
-            grid_obs_coord = obs_vec_body_frame / self.grid_res # relative vec from agent i.e. center of grid
-            # coordinate convention follows right hand rule, with positive z being above the agent's position
-            # i.e. grid[z, y, x] = occupancy(x, y, z). Each slice of grid moves down the z axis
-            x = np.clip(grid_center[0] + grid_obs_coord[0], 0, self.grid_size - 1)
-            y = np.clip(grid_center[1] + grid_obs_coord[1], 0, self.grid_size - 1)
-            z = np.clip(grid_center[2] + grid_obs_coord[2], 0, self.grid_size - 1)
-            voxel_grid[int(z), int(y), int(x)] = 1 # TODO: loses precision since int() rounds down; can interpolate in multiple grid cells when using finer grid
+            obs_vec_grid_frame = np.array([-obs_vec_body_frame[2], -obs_vec_body_frame[1], obs_vec_body_frame[0]]) / self.grid_res
+            # grid frame: z down, y out of the screen, x right
+            # body frame: z up, y into the screen, x right
+            z = np.clip(grid_center[0] + obs_vec_grid_frame[0], 0, self.grid_size - 1)
+            y = np.clip(grid_center[1] + obs_vec_grid_frame[1], 0, self.grid_size - 1)
+            x = np.clip(grid_center[2] + obs_vec_grid_frame[2], 0, self.grid_size - 1)
+            voxel_grid[0, int(round(z)), int(round(y)), int(round(x))] = 1 # TODO: loses precision since int() rounds down; can interpolate in multiple grid cells when using finer grid
             # TODO: test this with a known value i.e. obs at 1,1,1, and orientation at 45 deg so it should be at 0,0,1
+        
+        # project the goal as a gaussian blob with mean=1 at the goal onto a channel of the voxel grid
+        goal_vec = self._target_location - p
+        qg = multiply_quaternions(q_inverse, np.concatenate([[1], goal_vec])) # transform goal from world to body
+        goal_vec_body_frame = multiply_quaternions(qg, q)[1:]
+        # transform goal from body to grid frame (positive z is down in grid frame, y is out of the screen, x is right)
+        goal_vec_grid_frame = np.array([-goal_vec_body_frame[2], -goal_vec_body_frame[1], goal_vec_body_frame[0]]) / self.grid_res
+        start = grid_center.copy()
+        goal_position_grid_frame = grid_center + goal_vec_grid_frame
+        # print("Goal position grid frame: ", goal_position_grid_frame)
+        # print("Goal vec grid frame: ", goal_vec_grid_frame)
+        # Run DDA from grid center toward goal
+        final_voxel = self.dda_voxel_traversal_to_goal(
+            start_grid=grid_center,
+            goal_position_grid=goal_position_grid_frame,
+            max_steps=self.grid_size * 2,
+        )
+        # print("Final voxel: ", final_voxel)
+        zg, yg, xg = final_voxel
+        voxel_grid[1, int(zg), int(yg), int(xg)] = 1
+        # fill in Gaussian blob around the goal voxel
+        voxel_grid = self.fill_gaussian_blob(voxel_grid, final_voxel, p, q, q_inverse)
         return voxel_grid
 
     def _get_obs(self):
@@ -263,6 +413,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         voxel_grid = self.make_voxel_grid(position)
         observation = np.concatenate((position, velocity, goal_relative,
                             voxel_grid.flatten()))
+        if observation.shape != (16 + 2*self.grid_size**3,):
+            print("Observation shape: ", observation.shape)
         return observation
 
     def set_trajectory(self, trajectory, info):
