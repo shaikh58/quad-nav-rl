@@ -6,9 +6,11 @@ from gymnasium.spaces import Box
 import xml.etree.ElementTree as ET
 import os
 import mujoco
-from utils.env_utils import multiply_quaternions
+from utils.env_utils import multiply_quaternions, save_voxel_grid_video, create_voxel_grid_frame
 from utils.env_config_generator import EnvironmentConfigGenerator
 from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
+import matplotlib.pyplot as plt
+import imageio
 
 DEFAULT_CAMERA_CONFIG = {"distance": 4.0}
 DEFAULT_SIZE = 480
@@ -40,6 +42,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         progress_type: str = "euclidean", # "straight_line", "euclidean", "negative"
         reset_noise_scale: float = 0.1,
         mode: str = None,
+        run_name: str = None,
         config_generator: EnvironmentConfigGenerator = None,
         use_obstacles: bool = False,
         regen_obstacles: bool = False,
@@ -48,6 +51,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         grid_size: int = 10,
         grid_res: float = 0.5,
         goal_blob_std: float = 0.5,
+        save_voxel_grid_video: bool = False,
         **kwargs,
     ):
         self.obstacle_vec_size = 5
@@ -78,6 +82,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         )
         
         # generate env configs
+        self._run_name = run_name
         self._config_generator = config_generator
         env_config = self._config_generator.generate_env_config()
         self._start_location = env_config["start_location"]
@@ -121,6 +126,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                 self.model,self.data,DEFAULT_CAMERA_CONFIG,self.width,self.height,
                 self.max_geom,self.camera_id,self.camera_name,self.visual_options,
             )
+        if save_voxel_grid_video:
+            self.voxel_grid_video_dir = f"videos/{self._run_name}"
+            print("Saving voxel grid video to: ", self.voxel_grid_video_dir)
         # distance threshold to target location for success
         self._goal_threshold = goal_threshold
         self._goal_blob_std = goal_blob_std
@@ -146,6 +154,11 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self._top_k_obstacles = top_k_obstacles
         self.grid_size = grid_size
         self.grid_res = grid_res
+        self.voxel_grid = None
+        self.list_obs_vec_body_frame = []
+        self._voxel_grid_frames = []
+        self._episode_count = 0  # Track episode number
+        self._save_voxel_grid_video = save_voxel_grid_video
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
         self.hover_thrust = self.model.keyframe('hover').ctrl.copy()
@@ -372,6 +385,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             # if within the grid, rotate the grid to be in body frame
             qv = multiply_quaternions(q_inverse, np.concatenate([[1], pos - p]))
             obs_vec_body_frame = multiply_quaternions(qv, q)[1:]
+            self.list_obs_vec_body_frame.append(obs_vec_body_frame)
             # this might fall outside the grid since center is actually just
             ## off the true center of the grid
             obs_vec_grid_frame = np.array([-obs_vec_body_frame[2], -obs_vec_body_frame[1], obs_vec_body_frame[0]]) / self.grid_res
@@ -381,12 +395,14 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             y = np.clip(grid_center[1] + obs_vec_grid_frame[1], 0, self.grid_size - 1)
             x = np.clip(grid_center[2] + obs_vec_grid_frame[2], 0, self.grid_size - 1)
             voxel_grid[0, int(round(z)), int(round(y)), int(round(x))] = 1 # TODO: loses precision since int() rounds down; can interpolate in multiple grid cells when using finer grid
+            
             # TODO: test this with a known value i.e. obs at 1,1,1, and orientation at 45 deg so it should be at 0,0,1
         
         # project the goal as a gaussian blob with mean=1 at the goal onto a channel of the voxel grid
         goal_vec = self._target_location - p
         qg = multiply_quaternions(q_inverse, np.concatenate([[1], goal_vec])) # transform goal from world to body
         goal_vec_body_frame = multiply_quaternions(qg, q)[1:]
+        self.goal_vec_body_frame = goal_vec_body_frame
         # transform goal from body to grid frame (positive z is down in grid frame, y is out of the screen, x is right)
         goal_vec_grid_frame = np.array([-goal_vec_body_frame[2], -goal_vec_body_frame[1], goal_vec_body_frame[0]]) / self.grid_res
         start = grid_center.copy()
@@ -411,6 +427,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         velocity = self.data.qvel.flatten()
         goal_relative = self.data.qpos[:3] - self._target_location
         voxel_grid = self.make_voxel_grid(position)
+        self.voxel_grid = voxel_grid  # Store for visualization
         observation = np.concatenate((position, velocity, goal_relative,
                             voxel_grid.flatten()))
         if observation.shape != (16 + 2*self.grid_size**3,):
@@ -504,6 +521,12 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             self.set_start_goal_geoms()
             self.set_env_radius()
 
+        # Save previous episode's voxel grid video if we've collected frames
+        if self._save_voxel_grid_video and len(self._voxel_grid_frames) > 0:
+            save_voxel_grid_video(self._voxel_grid_frames, self._episode_count, self.voxel_grid_video_dir)
+            self._voxel_grid_frames = []
+        self._episode_count += 1
+        
         mujoco.mj_resetData(self.model, self.data)
         ob = self.reset_model()
         info = self._get_reset_info()
@@ -640,12 +663,20 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                 return True, "out_of_bounds"
 
         return False, "not_terminated"
+    
 
     def render(self):
         """
         Override the parent class render method to add custom logic before rendering.
         This allows intercepting the render() call from RecordVideo wrapper.
         """
+        # Capture voxel grid frame if enabled and it's time to render
+        if self._save_voxel_grid_video and self.voxel_grid is not None:
+            frame = create_voxel_grid_frame(self.voxel_grid, self.grid_size, self.grid_res, self.goal_vec_body_frame, self.list_obs_vec_body_frame, threshold=0.3)
+            if frame is not None:
+                self._voxel_grid_frames.append(frame)
+                self.list_obs_vec_body_frame = []
+        
         ego_coord = np.round(self.data.qpos[:3], 1)
         target_coord = np.round(self._target_location, 1)
         # add current coordinate as an overlay

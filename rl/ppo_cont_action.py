@@ -16,7 +16,7 @@ from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 from utils.env_utils import make_env
 import envs
-
+import imageio
 
 @dataclass
 class Args:
@@ -132,6 +132,8 @@ class Args:
     """size of the voxel grid around the agent"""
     grid_res: float = 1
     """resolution of the voxel grid"""
+    save_voxel_grid_video: bool = False
+    """whether to save the voxel grid video"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -273,7 +275,8 @@ if __name__ == "__main__":
         "start_location": start_location,
         "max_steps": args.max_steps,
         "reset_noise_scale": args.reset_noise_scale,
-        "save_path": f"runs/{run_name}",
+        "save_path": f"runs/{run_name}",    
+        "run_name": run_name,
         "mode": "train",
         "use_obstacles": args.use_obstacles,
         "regen_obstacles": args.regen_obstacles,
@@ -281,6 +284,9 @@ if __name__ == "__main__":
         "top_k_obstacles": args.top_k_obstacles,
         "grid_size": args.grid_size,
         "grid_res": args.grid_res,
+        "save_voxel_grid_video": args.save_voxel_grid_video,
+        "use_planner": args.use_planner,
+        "planner_type": args.planner_type,
     } # note the target and start location are set in the env randomizer but can be overridden by the user
     # for negative rewards (w./only positive at goal), we dont want to discount the reward
     if args.progress_type == "negative": 
@@ -288,7 +294,7 @@ if __name__ == "__main__":
     # NOTE: the seed is the same for all envs to ensure same start/goal locations chosen by randomizer
     # the seed will only be args.seed+i for having e.g. different start locations in each env
     envs = gym.vector.AsyncVectorEnv( # TODO: args.seed + i; see reset() below as well
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma, args.seed + i, use_planner=args.use_planner, planner_type=args.planner_type, **env_kwargs) for i in range(args.num_envs)]
+        [make_env(args.env_id, i, args.capture_video, args.gamma, args.seed + i, **env_kwargs) for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
@@ -306,7 +312,7 @@ if __name__ == "__main__":
     env_success_ctrs = np.zeros(args.num_envs)
     prev_success_ctr_vals = np.zeros(args.num_envs)
     goal_thresholds = [args.goal_threshold] * args.num_envs
-    idx_to_remove = None
+    idx_to_remove = []
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
@@ -358,7 +364,7 @@ if __name__ == "__main__":
                             start_pos = envs.unwrapped.get_attr("init_qpos")[k][:3]
                             end_pos = infos["pos"][k]
                             target_pos = envs.unwrapped.get_attr("_target_location")[k]
-                            if idx_to_remove != k:
+                            if k not in idx_to_remove:
                                 # only count as a success if that env is 'active' i.e. not filtered out from the learning process
                                 env_success_ctrs[k] += 1
                                 print(f"Success in env {k}!!! Start agent pos: {start_pos}, End agent pos: {end_pos}, Target pos: {target_pos}, Success count: {env_success_ctrs[k]}")
@@ -371,7 +377,7 @@ if __name__ == "__main__":
                 for k in range(args.num_envs):
                     if np.isnan(env_success_ctrs[k]):
                         continue
-                    if prev_success_ctr_vals[k] < env_success_ctrs[k] and idx_to_remove != k:
+                    if prev_success_ctr_vals[k] < env_success_ctrs[k] and k not in idx_to_remove:
                         # if there has been at least 1 success in this env, reduce the goal threshold
                         # frac = max(1.0 - (iteration - 1.0) / (args.num_iterations), 0.2)
                         goal_thresholds[k] *= args.goal_reduce_frac
@@ -399,7 +405,7 @@ if __name__ == "__main__":
                     advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
                 returns = advantages + values
 
-            # TODO: to sample 'out' some env's data i.e. for curriculum, do it here
+            # curriculum learning - filter out envs with high successes; only removes these envs from the network updates, not the env rollouts
             # identify which env to filter out by looking at env_success_ctrs
             # simply downweight the likelihood of sampling from this env with high success ctrs
             pct_successes = env_success_ctrs / env_success_ctrs.sum()
@@ -408,11 +414,21 @@ if __name__ == "__main__":
             # warm start - only remove envs after a certain number of iterations
             if np.isnan(pct_successes).any() or iteration < args.env_removal_start_iter or args.num_envs == 1:
                 idxs_to_keep = np.arange(args.num_envs)
-                idx_to_remove = None
+                idx_to_remove = []
             else:
                 idxs = np.argsort(pct_successes)
-                idxs_to_keep = idxs[:-1]
-                idx_to_remove = idxs[-1]
+                # idxs_to_keep = idxs[:-1]
+                # idx_to_remove = idxs[-1]
+                idx_to_remove = []
+                for i in range(len(idxs) - 1, -1, -1):
+                    if i == len(idxs) - 1:
+                        idx_to_remove.append(idxs[i])
+                    else:
+                        if pct_successes[idxs[i]] > 0.8 * pct_successes[idxs[i+1]] and i != 0:
+                            idx_to_remove.append(idxs[i])
+                        else:
+                            break
+                idxs_to_keep = np.setdiff1d(np.arange(args.num_envs), idx_to_remove)
                 print(f"Removing env with index: {idx_to_remove}")
             
             values_to_keep = values[:,idxs_to_keep]
@@ -513,8 +529,8 @@ if __name__ == "__main__":
         print("Total training time:", time.time() - start_time)
         # save some videos (create an env, rollout, and capture the video)
         all_advs = np.stack(all_advs)
-        np.save(f"runs/{run_name}/all_advs.npy", all_advs)
-        np.save(f"runs/{run_name}/env_success_ctrs.npy", env_success_ctrs)
+        # np.save(f"runs/{run_name}/all_advs.npy", all_advs)
+        # np.save(f"runs/{run_name}/env_success_ctrs.npy", env_success_ctrs)
 
     except KeyboardInterrupt:
         print("Training interrupted by user - saving model and running eval")
@@ -540,17 +556,16 @@ if __name__ == "__main__":
         env_kwargs["use_obstacles"] = args.use_obstacles
         env_kwargs["regen_obstacles"] = args.regen_obstacles
         env_kwargs["obs_regen_eps"] = args.obs_regen_eps
+        env_kwargs["save_path"] = f"runs/{run_name}"
         agent.eval()
 
         n_episodes = 5
         # reset the env to set the start/goal pos according to randomizer
         for i in range(n_episodes):
-            seed_offset = 0 # 20*i + 5 # to get diff envs
+            seed_offset = 20*i + 5 # to get diff envs
             # create a random env (random start/obstacles but fixed goal)
             envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference, except start position
-            [make_env(args.env_id, 0, False, 
-            run_name, args.gamma, args.seed + seed_offset, use_planner=args.use_planner, planner_type=args.planner_type,  
-            **env_kwargs) for i in range(1)]
+            [make_env(args.env_id, 0, False, args.gamma, args.seed + seed_offset, **env_kwargs) for _ in range(1)]
             )
             obs, _ = envs.reset(seed=args.seed + seed_offset)
             video = []
@@ -558,7 +573,7 @@ if __name__ == "__main__":
             iters = 0
             while not over and iters < 1000: # manual termination to prevent infinite loop
                 with torch.no_grad():
-                    obs_encoded = agent.obs_encoder(torch.tensor(obs))
+                    obs_encoded = agent.obs_encoder(torch.tensor(obs, dtype=torch.float32, device=device))
                     action = agent.actor_mean(obs_encoded) # deterministic action during inference
                 obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
                 rgb_array = envs.render()
@@ -569,12 +584,12 @@ if __name__ == "__main__":
             imageio.mimsave(f"{video_path}/ep_{i}.mp4", np.array(video).squeeze(), fps=30)
             envs.close()
 
-        if args.upload_model:
-            from cleanrl_utils.huggingface import push_to_hub
+        # if args.upload_model:
+        #     from cleanrl_utils.huggingface import push_to_hub
 
-            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(args, episodic_returns, repo_id, "PPO", f"runs/{run_name}", f"videos/{run_name}-eval")
+        #     repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
+        #     repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
+        #     push_to_hub(args, None, repo_id, "PPO", f"runs/{run_name}", f"videos/{run_name}-eval")
 
     envs.close()
     writer.close()
