@@ -34,7 +34,7 @@ class Args:
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
-    capture_video: bool = False
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
@@ -162,27 +162,33 @@ def set_global_seed(seed):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        self.channels = 2
+        self.state_goal_vec_embed_dim = 18 # qpos=7, qvel=6, goal_vec_spherical=5
+        self.cnn_out_dim = 32
+        self.qpos_dim = 7
+        self.qvel_dim = 6
+        self.goal_vec_spherical_dim = 5
+        self.voxel_grid_channels = 1
+
         self.conv3d = nn.Sequential(
-            nn.Conv3d(self.channels, 8, kernel_size=3, stride=1, padding=1),
+            nn.Conv3d(self.voxel_grid_channels, 8, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Conv3d(8, 16, kernel_size=3, stride=2, padding=1),
             nn.ReLU()
         )
         self.conv2d = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(16, self.cnn_out_dim, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
             nn.AdaptiveMaxPool2d((1, 1))
         )
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(32 + 16, 128)), # 32 is output of cnn, 13 is the agent pos/vel
+            layer_init(nn.Linear(self.cnn_out_dim + self.state_goal_vec_embed_dim, 128)), # 32 is output of cnn, 13 is the agent pos/vel
             nn.Tanh(),
             layer_init(nn.Linear(128, 128)),
             nn.Tanh(),
             layer_init(nn.Linear(128, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(32 + 16, 128)), # conv output has shape 32, 16 is the agent pos/vel
+            layer_init(nn.Linear(self.cnn_out_dim + self.state_goal_vec_embed_dim, 128)), # conv output has shape 32, 32 is the projectedagent pos/vel/goal vec
             nn.Tanh(),
             layer_init(nn.Linear(128, 128)),
             nn.Tanh(),
@@ -199,17 +205,25 @@ class Agent(nn.Module):
             # self.actor_mean[-1].bias.fill_(scaled_hover_thrust)
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
         self.grid_size = envs.unwrapped.get_attr("grid_size")[0]
+        self.goal_qpos_mlp = nn.Sequential(
+            layer_init(nn.Linear(self.qpos_dim + self.qvel_dim + self.goal_vec_spherical_dim, self.state_goal_vec_embed_dim)),
+            nn.Tanh(),
+            layer_init(nn.Linear(self.state_goal_vec_embed_dim, self.state_goal_vec_embed_dim)),
+        )
 
     def obs_encoder(self, x):
-        voxel_grids = x[:,16:].reshape((-1, self.channels, self.grid_size, self.grid_size, self.grid_size))
+        voxel_grids = x[:,self.qpos_dim + self.qvel_dim + self.goal_vec_spherical_dim:].reshape((-1, self.voxel_grid_channels, self.grid_size, self.grid_size, self.grid_size))
         conv_out = self.conv3d(voxel_grids) # B, C, D, H, W
         conv_out = torch.mean(conv_out, dim=2) # collapse the depth dimension
         conv_out = self.conv2d(conv_out)
         conv_out = conv_out.squeeze()
         if conv_out.dim() == 1:
             conv_out = conv_out.unsqueeze(0)
-        # TODO: experiment with MLP to fuse state w./ obs encoding
-        out = torch.cat([x[:,:16], conv_out], dim=1)
+        # project the state/goal vector 
+        state_goal_vecs = x[:,:self.qpos_dim + self.qvel_dim + self.goal_vec_spherical_dim]
+        # state_goal_vecs = self.goal_qpos_mlp(state_goal_vecs)
+        # concatenate the state/goal vector with the conv output
+        out = torch.cat([state_goal_vecs, conv_out], dim=1)
         return out
 
     def get_value(self, x):
@@ -562,7 +576,7 @@ if __name__ == "__main__":
         n_episodes = 5
         # reset the env to set the start/goal pos according to randomizer
         for i in range(n_episodes):
-            seed_offset = 20*i + 5 # to get diff envs
+            seed_offset = i  # to match training # 20*i + 5 # to get diff envs
             # create a random env (random start/obstacles but fixed goal)
             envs = gym.vector.SyncVectorEnv(# NOTE: we don't randomize the env during inference, except start position
             [make_env(args.env_id, 0, False, args.gamma, args.seed + seed_offset, **env_kwargs) for _ in range(1)]

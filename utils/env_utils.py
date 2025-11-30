@@ -65,58 +65,45 @@ def multiply_quaternions(q0, q1):
 
     return np.array([w, x, y, z])
 
-def create_voxel_grid_frame(voxel_grid, grid_size, grid_res, goal_vec_body_frame, list_obs_vec_body_frame, threshold=0.3):
+def create_voxel_grid_frame(voxel_grid, grid_size, grid_res, goal_vec_body_frame, list_obs_vec_body_frame, threshold=0.2):
     """Simple 3D visualization of voxel grid using matplotlib in body frame."""
     from mpl_toolkits.mplot3d import Axes3D
     
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection='3d')
-    
+    ax.view_init(elev=90, azim=90)
     # Grid center in indices
     grid_center_idx = np.array([grid_size // 2, grid_size // 2, grid_size // 2])
     grid_half_size = (grid_size // 2) * grid_res
     
     # Plot obstacles (red) and goal (green)
     obstacle_mask = voxel_grid[0] > threshold
-    goal_mask = voxel_grid[1] > threshold
     # Add blue marker at the origin (0,0,0) for the agent position in body frame
     ax.scatter(0, 0, 0, c='b', marker='o', s=200, alpha=1.0, label='Agent')
     # Convert grid frame indices to body frame positions
     if np.any(obstacle_mask):
         z_grid, y_grid, x_grid = np.where(obstacle_mask)
         # Convert indices to grid frame positions (meters, centered at origin)
-        pos_grid_frame = np.array([
-            (x_grid - grid_center_idx[2]) * grid_res,  # x in grid frame
-            (y_grid - grid_center_idx[1]) * grid_res,  # y in grid frame
-            (z_grid - grid_center_idx[0]) * grid_res   # z in grid frame
-        ]).T
-        # Transform to body frame: body = [grid[2], -grid[1], -grid[0]]
         pos_body_frame = np.array([
-            pos_grid_frame[:, 2],   # body x = grid z
-            -pos_grid_frame[:, 1],  # body y = -grid y
-            -pos_grid_frame[:, 0]   # body z = -grid x
+            (x_grid - grid_center_idx[2]) * grid_res,  # x in grid frame
+            -(y_grid - grid_center_idx[1]) * grid_res,  # y in grid frame
+            -(z_grid - grid_center_idx[0]) * grid_res   # z in grid frame
         ]).T
         
         ax.scatter(pos_body_frame[:, 0], pos_body_frame[:, 1], pos_body_frame[:, 2], 
                     c='r',marker='s',s=100,alpha=0.6,
                     label='Obstacles:\n' + '\n'.join([f'{entry}' for entry in list_obs_vec_body_frame]))
-    
-    if np.any(goal_mask):
-        z_grid, y_grid, x_grid = np.where(goal_mask)
-        # Convert indices to grid frame positions (meters, centered at origin)
-        pos_grid_frame = np.array([
-            (x_grid - grid_center_idx[2]) * grid_res,  # x in grid frame
-            (y_grid - grid_center_idx[1]) * grid_res,  # y in grid frame
-            (z_grid - grid_center_idx[0]) * grid_res   # z in grid frame
-        ]).T
-        # Transform to body frame: body = [grid[2], -grid[1], -grid[0]]
-        pos_body_frame = np.array([
-            pos_grid_frame[:, 2],   # body x = grid z
-            -pos_grid_frame[:, 1],  # body y = -grid y
-            -pos_grid_frame[:, 0]   # body z = -grid x
-        ]).T
-        ax.scatter(pos_body_frame[:, 0], pos_body_frame[:, 1], pos_body_frame[:, 2], 
-                    c='g', marker='s', s=100, alpha=0.6, label=f'Goal: {goal_vec_body_frame}')
+    # 29 Nov - disabled goal projection onto grid
+    # if np.any(goal_mask):
+    #     z_grid, y_grid, x_grid = np.where(goal_mask)
+    #     # Convert indices to grid frame positions (meters, centered at origin)
+    #     pos_body_frame = np.array([
+    #         (x_grid - grid_center_idx[2]) * grid_res,  # x in grid frame
+    #         -(y_grid - grid_center_idx[1]) * grid_res,  # y in grid frame
+    #         -(z_grid - grid_center_idx[0]) * grid_res   # z in grid frame
+    #     ]).T
+    ax.scatter(goal_vec_body_frame[0], goal_vec_body_frame[1], goal_vec_body_frame[2], 
+                c='g', marker='s', s=100, alpha=0.6, label=f'Goal: {goal_vec_body_frame}')
     
     ax.set_xlabel('X (body frame)')
     ax.set_ylabel('Y (body frame)')
@@ -193,3 +180,129 @@ class NormalizeObservation(
         return np.float32(
             (observation - self.obs_rms.mean) / np.sqrt(self.obs_rms.var + self.epsilon)
         )
+
+
+def dda_voxel_traversal_to_goal(start_grid, goal_position_grid, max_steps, grid_size):
+    """
+    3D DDA voxel grid traversal from start toward goal.
+    Stops when reaching the goal voxel OR leaving the grid.
+    
+    Args:
+        start_grid: Starting position in grid coordinates (z, y, x)
+        goal_position_grid: Goal position in grid coordinates (z, y, x) - ABSOLUTE position, not relative
+        max_steps: Maximum number of voxels to traverse
+    
+    Returns:
+        Final voxel position (z, y, x) where ray stopped
+    """
+    # Direction from start to goal
+    direction_grid = goal_position_grid - start_grid
+    goal_voxel = np.floor(goal_position_grid).astype(int)
+    current_voxel = np.floor(start_grid).astype(int)
+    direction_normalized = direction_grid / np.linalg.norm(direction_grid)
+    # Step direction for each axis (+1 or -1)
+    step = np.sign(direction_normalized).astype(int)
+    
+    # tDelta: how far along the ray we must move (in units of t) to cross one voxel boundary
+    tDelta = np.zeros(3)
+    for i in range(3):
+        if direction_normalized[i] != 0:
+            tDelta[i] = abs(1.0 / direction_normalized[i])
+        else:
+            tDelta[i] = float('inf')
+    
+    # tMax: how far along the ray we must move to reach the next voxel boundary on each axis
+    tMax = np.zeros(3)
+    for i in range(3):
+        if direction_normalized[i] > 0:
+            tMax[i] = (np.ceil(start_grid[i]) - start_grid[i]) * tDelta[i]
+        elif direction_normalized[i] < 0:
+            tMax[i] = (start_grid[i] - np.floor(start_grid[i])) * tDelta[i]
+        else:
+            tMax[i] = float('inf')
+    
+    # Handle case where we start exactly on a boundary i.e. at the grid center
+    for i in range(3):
+        if tMax[i] == 0:
+            tMax[i] = tDelta[i]
+    
+    for _ in range(max_steps):
+        # Check if current voxel is out of bounds
+        if (current_voxel < 0).any() or (current_voxel >= grid_size).any():
+            # if oob, we want to project goal onto closest grid face anyway
+            return np.clip(current_voxel, 0, grid_size - 1)
+        # Check if we've reached the goal voxel; kept separate for easier debugging
+        if np.array_equal(current_voxel, goal_voxel):
+            # print("Reached goal voxel: ", current_voxel)
+            return current_voxel
+        
+        # Find which axis to step on (the one with smallest tMax)
+        axis = np.argmin(tMax)
+        
+        # Step to next voxel on that axis
+        current_voxel[axis] += step[axis]
+        tMax[axis] += tDelta[axis]
+    
+    # Max steps reached, return current position
+    return np.clip(current_voxel, 0, grid_size - 1)
+
+def fill_2d_gaussian_blob(voxel_grid, voxel, axis, grid_size, grid_res, goal_blob_std):
+    """
+    Fill in a 2D Gaussian blob around the given voxel.
+    """
+    zc, yc, xc = voxel
+    if axis == "z":
+        X, Y = np.meshgrid(np.arange(0, grid_size), np.arange(0, grid_size))
+        dx = (X - xc) * grid_res
+        dy = (Y - yc) * grid_res
+        kernel = np.exp(-(dx**2 + dy**2) / (2 * goal_blob_std**2))
+        voxel_grid[1, zc, :, :] = kernel
+    elif axis == "y":
+        X, Z = np.meshgrid(np.arange(0, grid_size), np.arange(0, grid_size))
+        dx = (X - xc) * grid_res
+        dz = (Z - zc) * grid_res
+        kernel = np.exp(-(dx**2 + dz**2) / (2 * goal_blob_std**2))
+        voxel_grid[1, :, yc, :] = kernel
+    elif axis == "x":
+        Y, Z = np.meshgrid(np.arange(0, grid_size), np.arange(0, grid_size))
+        dy = (Y - yc) * grid_res
+        dz = (Z - zc) * grid_res
+        kernel = np.exp(-(dy**2 + dz**2) / (2 * goal_blob_std**2))
+        voxel_grid[1, :, :, xc] = kernel
+    else:
+        raise ValueError(f"Invalid axis: {axis}")
+    
+    return voxel_grid
+
+def fill_3d_gaussian_blob(voxel_grid, voxel, fill_channel, grid_size, grid_res, goal_blob_std):
+    """
+    Fill in a 3D Gaussian blob around the given voxel.
+    """
+    zc, yc, xc = voxel
+    Z, Y, X = np.meshgrid(np.arange(0, grid_size), np.arange(0, grid_size), np.arange(0, grid_size))
+    dx = (X - xc) * grid_res
+    dy = (Y - yc) * grid_res
+    dz = (Z - zc) * grid_res
+    kernel = np.exp(-(dx**2 + dy**2 + dz**2) / (2 * goal_blob_std**2))
+    voxel_grid[fill_channel, :, :, :] = kernel
+    return voxel_grid
+
+def fill_gaussian_blob(voxel_grid, voxel, fill_channel, grid_size, grid_res, goal_blob_std):
+    """
+    Fill in a Gaussian blob around the given voxel. If the goal is within the grid, fill in a 3d gaussian blob.
+    Otherwise, fill in a 2d gaussian blob on the grid face.
+    """
+    zc, yc, xc = voxel
+    if zc == 0 or zc == grid_size - 1 or yc == 0 or yc == grid_size - 1 or xc == 0 or xc == grid_size - 1:
+        # 2d gaussian on the grid face
+        if zc == 0 or zc == grid_size - 1: # top or bottom face
+            voxel_grid = fill_2d_gaussian_blob(voxel_grid, voxel, "z", grid_size, grid_res, goal_blob_std)
+        elif yc == 0 or yc == grid_size - 1: # front or back face
+            voxel_grid = fill_2d_gaussian_blob(voxel_grid, voxel, "y", grid_size, grid_res, goal_blob_std)
+        elif xc == 0 or xc == grid_size - 1: # left or right face
+            voxel_grid = fill_2d_gaussian_blob(voxel_grid, voxel, "x", grid_size, grid_res, goal_blob_std)
+    else:
+        # 3d gaussian in the grid
+        # print("Goal in grid: ", voxel)
+        voxel_grid = fill_3d_gaussian_blob(voxel_grid, voxel, fill_channel, grid_size, grid_res, goal_blob_std)
+    return voxel_grid
