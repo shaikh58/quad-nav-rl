@@ -65,52 +65,45 @@ def multiply_quaternions(q0, q1):
 
     return np.array([w, x, y, z])
 
-def create_voxel_grid_frame(voxel_grid, grid_size, grid_res, goal_vec_body_frame, list_obs_vec_body_frame, threshold=0.2):
+def spherical_to_cartesian(r, az, el):
+    x = r * np.cos(az) * np.cos(el)
+    y = r * np.sin(az) * np.cos(el)
+    z = r * np.sin(el)
+    return np.array([x, y, z])
+
+def create_lidar_scan_frame(lidar_scan, goal_vec_body_frame, list_obs_vec_body_frame, lidar_scan_range,
+    lidar_min_elevation, lidar_max_elevation, lidar_min_fov, lidar_max_fov, lidar_elevation_bins, lidar_scan_bins):
     """Simple 3D visualization of voxel grid using matplotlib in body frame."""
     from mpl_toolkits.mplot3d import Axes3D
     
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection='3d')
-    ax.view_init(elev=90, azim=90)
-    # Grid center in indices
-    grid_center_idx = np.array([grid_size // 2, grid_size // 2, grid_size // 2])
-    grid_half_size = (grid_size // 2) * grid_res
-    
-    # Plot obstacles (red) and goal (green)
-    obstacle_mask = voxel_grid[0] > threshold
+    ax.view_init(elev=45, azim=45)
+
     # Add blue marker at the origin (0,0,0) for the agent position in body frame
     ax.scatter(0, 0, 0, c='b', marker='o', s=200, alpha=1.0, label='Agent')
-    # Convert grid frame indices to body frame positions
-    if np.any(obstacle_mask):
-        z_grid, y_grid, x_grid = np.where(obstacle_mask)
-        # Convert indices to grid frame positions (meters, centered at origin)
-        pos_body_frame = np.array([
-            (x_grid - grid_center_idx[2]) * grid_res,  # x in grid frame
-            -(y_grid - grid_center_idx[1]) * grid_res,  # y in grid frame
-            -(z_grid - grid_center_idx[0]) * grid_res   # z in grid frame
-        ]).T
-        
-        ax.scatter(pos_body_frame[:, 0], pos_body_frame[:, 1], pos_body_frame[:, 2], 
-                    c='r',marker='s',s=100,alpha=0.6,
-                    label='Obstacles:\n' + '\n'.join([f'{entry}' for entry in list_obs_vec_body_frame]))
-    # 29 Nov - disabled goal projection onto grid
-    # if np.any(goal_mask):
-    #     z_grid, y_grid, x_grid = np.where(goal_mask)
-    #     # Convert indices to grid frame positions (meters, centered at origin)
-    #     pos_body_frame = np.array([
-    #         (x_grid - grid_center_idx[2]) * grid_res,  # x in grid frame
-    #         -(y_grid - grid_center_idx[1]) * grid_res,  # y in grid frame
-    #         -(z_grid - grid_center_idx[0]) * grid_res   # z in grid frame
-    #     ]).T
+    # obstacle positions
+    # for obs_vec in list_obs_vec_body_frame:
+    #     ax.scatter(obs_vec[0], obs_vec[1], obs_vec[2], 
+    #                 c='r',marker='s',s=100,alpha=0.6)
+    # goal position
     ax.scatter(goal_vec_body_frame[0], goal_vec_body_frame[1], goal_vec_body_frame[2], 
                 c='g', marker='s', s=100, alpha=0.6, label=f'Goal: {goal_vec_body_frame}')
-    
+    # lidar scan
+    # convert scan back into body frame
+    occupied = np.where(lidar_scan < lidar_scan_range)
+    for elev_idx, scan_idx in zip(*occupied):
+        elevation_angle = lidar_min_elevation + elev_idx * (lidar_max_elevation - lidar_min_elevation) / (lidar_elevation_bins - 1)
+        scan_angle = np.pi/2 - (lidar_min_fov + scan_idx * (lidar_max_fov - lidar_min_fov) / (lidar_scan_bins - 1))
+        r = lidar_scan[elev_idx, scan_idx]
+        x, y, z = spherical_to_cartesian(r, scan_angle, elevation_angle)
+        ax.scatter(x, y, z, c='k', marker='.', s=10, alpha=0.8)
     ax.set_xlabel('X (body frame)')
     ax.set_ylabel('Y (body frame)')
     ax.set_zlabel('Z (body frame)')
-    ax.set_xlim(-grid_half_size, grid_half_size)
-    ax.set_ylim(-grid_half_size, grid_half_size)
-    ax.set_zlim(-grid_half_size, grid_half_size)
+    ax.set_xlim(-lidar_scan_range, lidar_scan_range)
+    ax.set_ylim(-lidar_scan_range, lidar_scan_range)
+    ax.set_zlim(-lidar_scan_range, lidar_scan_range)
     ax.legend()
     
     # Convert to numpy array
@@ -121,13 +114,13 @@ def create_voxel_grid_frame(voxel_grid, grid_size, grid_res, goal_vec_body_frame
     plt.close(fig)
     return image[:, :, :3]
 
-def save_voxel_grid_video(voxel_grid_frames, episode_count, output_dir, fps=10):
+def save_lidar_scan_video(lidar_scan_frames, episode_count, output_dir, fps=10):
     """Save accumulated frames as video."""
-    if len(voxel_grid_frames) == 0:
+    if len(lidar_scan_frames) == 0:
         return
     os.makedirs(output_dir, exist_ok=True)
-    filename = os.path.join(output_dir, f"voxel_grid_episode_{episode_count}.mp4")
-    imageio.mimsave(filename, voxel_grid_frames, fps=fps)
+    filename = os.path.join(output_dir, f"lidar_scan_episode_{episode_count}.mp4")
+    imageio.mimsave(filename, lidar_scan_frames, fps=fps)
 
 
 class NormalizeObservation(

@@ -128,12 +128,22 @@ class Args:
     """the fraction by which to reduce the goal threshold"""
     env_removal_start_iter: int = 10000
     """the iteration at which to start removing envs for curriculum"""
-    grid_size: int = 10
-    """size of the voxel grid around the agent"""
-    grid_res: float = 1
-    """resolution of the voxel grid"""
-    save_voxel_grid_video: bool = False
-    """whether to save the voxel grid video"""
+    save_lidar_scan_video: bool = True
+    """whether to save the lidar scan video"""
+    lidar_scan_bins: int = 32
+    """the number of bins for the lidar scan"""
+    lidar_elevation_bins: int = 8
+    """the number of bins for the lidar elevation"""
+    lidar_scan_range: float = 5
+    """the range of the lidar scan"""
+    lidar_max_fov: float = np.pi/3
+    """the maximum field of view of the lidar scan"""
+    lidar_min_fov: float = -np.pi/3
+    """the minimum field of view of the lidar scan"""
+    lidar_max_elevation: float = np.pi/4
+    """the maximum elevation of the lidar scan"""
+    lidar_min_elevation: float = -np.pi/4
+    """the minimum elevation of the lidar scan"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -163,32 +173,22 @@ class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
         self.state_goal_vec_embed_dim = 18 # qpos=7, qvel=6, goal_vec_spherical=5
-        self.cnn_out_dim = 32
         self.qpos_dim = 7
         self.qvel_dim = 6
         self.goal_vec_spherical_dim = 5
-        self.voxel_grid_channels = 1
+        self.lidar_scan_bins = args.lidar_scan_bins
+        self.lidar_elevation_bins = args.lidar_elevation_bins
+        self.lidar_scan_dim = self.lidar_scan_bins * self.lidar_elevation_bins
 
-        self.conv3d = nn.Sequential(
-            nn.Conv3d(self.voxel_grid_channels, 8, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Conv3d(8, 16, kernel_size=3, stride=2, padding=1),
-            nn.ReLU()
-        )
-        self.conv2d = nn.Sequential(
-            nn.Conv2d(16, self.cnn_out_dim, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveMaxPool2d((1, 1))
-        )
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(self.cnn_out_dim + self.state_goal_vec_embed_dim, 128)), # 32 is output of cnn, 13 is the agent pos/vel
+            layer_init(nn.Linear(self.lidar_scan_dim + self.state_goal_vec_embed_dim, 128)), # 32 is output of cnn, 13 is the agent pos/vel
             nn.Tanh(),
             layer_init(nn.Linear(128, 128)),
             nn.Tanh(),
             layer_init(nn.Linear(128, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(self.cnn_out_dim + self.state_goal_vec_embed_dim, 128)), # conv output has shape 32, 32 is the projectedagent pos/vel/goal vec
+            layer_init(nn.Linear(self.lidar_scan_dim + self.state_goal_vec_embed_dim, 128)), # lidar scan has shape 64*8, 32 is the projected agent pos/vel/goal vec
             nn.Tanh(),
             layer_init(nn.Linear(128, 128)),
             nn.Tanh(),
@@ -204,7 +204,6 @@ class Agent(nn.Module):
             # scaled_hover_thrust = -1 + 2 * (hover_thrust - -1) / 2
             # self.actor_mean[-1].bias.fill_(scaled_hover_thrust)
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
-        self.grid_size = envs.unwrapped.get_attr("grid_size")[0]
         self.goal_qpos_mlp = nn.Sequential(
             layer_init(nn.Linear(self.qpos_dim + self.qvel_dim + self.goal_vec_spherical_dim, self.state_goal_vec_embed_dim)),
             nn.Tanh(),
@@ -212,18 +211,12 @@ class Agent(nn.Module):
         )
 
     def obs_encoder(self, x):
-        voxel_grids = x[:,self.qpos_dim + self.qvel_dim + self.goal_vec_spherical_dim:].reshape((-1, self.voxel_grid_channels, self.grid_size, self.grid_size, self.grid_size))
-        conv_out = self.conv3d(voxel_grids) # B, C, D, H, W
-        conv_out = torch.mean(conv_out, dim=2) # collapse the depth dimension
-        conv_out = self.conv2d(conv_out)
-        conv_out = conv_out.squeeze()
-        if conv_out.dim() == 1:
-            conv_out = conv_out.unsqueeze(0)
+        lidar_scan = x[:,self.qpos_dim + self.qvel_dim + self.goal_vec_spherical_dim:].float() # already flat from step()
         # project the state/goal vector 
         state_goal_vecs = x[:,:self.qpos_dim + self.qvel_dim + self.goal_vec_spherical_dim]
         # state_goal_vecs = self.goal_qpos_mlp(state_goal_vecs)
         # concatenate the state/goal vector with the conv output
-        out = torch.cat([state_goal_vecs, conv_out], dim=1)
+        out = torch.cat([state_goal_vecs, lidar_scan], dim=1)
         return out
 
     def get_value(self, x):
@@ -296,11 +289,16 @@ if __name__ == "__main__":
         "regen_obstacles": args.regen_obstacles,
         "obs_regen_eps": args.obs_regen_eps,
         "top_k_obstacles": args.top_k_obstacles,
-        "grid_size": args.grid_size,
-        "grid_res": args.grid_res,
-        "save_voxel_grid_video": args.save_voxel_grid_video,
+        "save_lidar_scan_video": args.save_lidar_scan_video,
         "use_planner": args.use_planner,
         "planner_type": args.planner_type,
+        "lidar_scan_bins": args.lidar_scan_bins,
+        "lidar_elevation_bins": args.lidar_elevation_bins,
+        "lidar_scan_range": args.lidar_scan_range,
+        "lidar_max_fov": args.lidar_max_fov,
+        "lidar_min_fov": args.lidar_min_fov,
+        "lidar_max_elevation": args.lidar_max_elevation,
+        "lidar_min_elevation": args.lidar_min_elevation,
     } # note the target and start location are set in the env randomizer but can be overridden by the user
     # for negative rewards (w./only positive at goal), we dont want to discount the reward
     if args.progress_type == "negative": 

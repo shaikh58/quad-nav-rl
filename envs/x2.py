@@ -6,8 +6,7 @@ from gymnasium.spaces import Box
 import xml.etree.ElementTree as ET
 import os
 import mujoco
-from utils.env_utils import multiply_quaternions, save_voxel_grid_video, create_voxel_grid_frame
-from utils.env_utils import fill_gaussian_blob, dda_voxel_traversal_to_goal, fill_3d_gaussian_blob
+from utils.env_utils import multiply_quaternions, create_lidar_scan_frame, spherical_to_cartesian, save_lidar_scan_video
 from utils.env_config_generator import EnvironmentConfigGenerator
 from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 import matplotlib.pyplot as plt
@@ -49,16 +48,21 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         regen_obstacles: bool = False,
         obs_regen_eps: float = 0.8, # prob with which to resample obstacles after each episode,
         top_k_obstacles: int = 5,
-        grid_size: int = 10,
-        grid_res: float = 0.5,
         goal_blob_std: float = 0.5,
-        save_voxel_grid_video: bool = False,
+        save_lidar_scan_video: bool = False,
         **kwargs,
     ):
-        self.voxel_grid_channels = 1
+        self.lidar_scan_bins = kwargs.get("lidar_scan_bins", 64)
+        self.lidar_elevation_bins = kwargs.get("lidar_elevation_bins", 8)
+        self.lidar_scan_range = kwargs.get("lidar_scan_range", 10.0)
+        self.lidar_max_fov = kwargs.get("lidar_max_fov", np.pi/3)
+        self.lidar_min_fov = kwargs.get("lidar_min_fov", -np.pi/3)
+        self.lidar_max_elevation = kwargs.get("lidar_max_elevation", np.pi/3)
+        self.lidar_min_elevation = kwargs.get("lidar_min_elevation", -np.pi/3)
+        
         self.observation_space = Box(
-            low=-np.inf, high=np.inf, shape=(13 + 5 + self.voxel_grid_channels*grid_size**3,), dtype=np.float64
-        ) # qpos (7), qvel (6), goal_relative spherical (5), obstacle representation (grid_size^3)
+            low=-np.inf, high=np.inf, shape=(13 + 5 + self.lidar_scan_bins * self.lidar_elevation_bins,), dtype=np.float64
+        ) # qpos (7), qvel (6), goal_relative spherical (5), lidar scan
         self.render_mode = kwargs.get("render_mode", "rgb_array")
 
         if xml_file is None:
@@ -99,6 +103,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self.model.vis.global_.offwidth = self.width
         self.model.vis.global_.offheight = self.height
         self.data = mujoco.MjData(self.model)
+        # Get body ID for 'x2' (exclude this body and its children from raycasting)
+        self.x2_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'x2')
         
         self._use_obstacles = use_obstacles
         if self._use_obstacles:
@@ -126,9 +132,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                 self.model,self.data,DEFAULT_CAMERA_CONFIG,self.width,self.height,
                 self.max_geom,self.camera_id,self.camera_name,self.visual_options,
             )
-        if save_voxel_grid_video:
-            self.voxel_grid_video_dir = f"videos/{self._run_name}"
-            print("Saving voxel grid video to: ", self.voxel_grid_video_dir)
+        if save_lidar_scan_video:
+            self.lidar_scan_video_dir = f"videos/{self._run_name}"
+            print("Saving lidar scan video to: ", self.lidar_scan_video_dir)
         # distance threshold to target location for success
         self._goal_threshold = goal_threshold
         self._goal_blob_std = goal_blob_std
@@ -152,13 +158,11 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         self._obs_regen_eps = obs_regen_eps
         self._regen_obstacles = regen_obstacles
         self._top_k_obstacles = top_k_obstacles
-        self.grid_size = grid_size
-        self.grid_res = grid_res
-        self.voxel_grid = None
+        self.lidar_scan = None
         self.list_obs_vec_body_frame = []
-        self._voxel_grid_frames = []
+        self._lidar_scan_frames = []
         self._episode_count = 0  # Track episode number
-        self._save_voxel_grid_video = save_voxel_grid_video
+        self._save_lidar_scan_video = save_lidar_scan_video
         self.mass = self.model.body_mass.sum()
         self.g = self.model.opt.gravity[2].item()
         self.hover_thrust = self.model.keyframe('hover').ctrl.copy()
@@ -244,40 +248,46 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         return control_cost
 
 
-    def make_voxel_grid(self, position):
+    def make_lidar_scan(self, position):
         # first channel is for obstacles, second channel is for goal
-        voxel_grid = np.zeros((self.voxel_grid_channels, self.grid_size, self.grid_size, self.grid_size))
-        grid_half_size = (self.grid_size // 2) * self.grid_res
-        grid_center = np.array([self.grid_size // 2, self.grid_size // 2, self.grid_size // 2])
+        lidar_scan = np.zeros((self.lidar_elevation_bins, self.lidar_scan_bins)) # (elevation, scan)
+
         p = position[:3]
         q = position[3:7]
         q_inverse = np.array([q[0], -q[1], -q[2], -q[3]])
-        for obstacle in self.obstacle_metadata:
-            pos = obstacle["position"]
-            radius = obstacle["radius"]
-            # Check if obstacle's position is within the cubic voxel grid centered at the agent's position
-            if not np.all(np.abs(pos - p) < grid_half_size):
-                continue
-            # if within the grid, rotate the grid to be in body frame
-            qv = multiply_quaternions(q_inverse, np.concatenate([[1], pos - p]))
-            obs_vec_body_frame = multiply_quaternions(qv, q)[1:]
-            self.list_obs_vec_body_frame.append(obs_vec_body_frame)
-            # this might fall outside the grid since center is actually just
-            ## off the true center of the grid
-            obs_vec_grid_frame = np.array([-obs_vec_body_frame[2], -obs_vec_body_frame[1], obs_vec_body_frame[0]]) / self.grid_res
-            # grid frame: z down, y out of the screen, x right
-            # body frame: z up, y into the screen, x right
-            z = np.clip(grid_center[0] + obs_vec_grid_frame[0], 0, self.grid_size - 1)
-            y = np.clip(grid_center[1] + obs_vec_grid_frame[1], 0, self.grid_size - 1)
-            x = np.clip(grid_center[2] + obs_vec_grid_frame[2], 0, self.grid_size - 1)
-            voxel_grid[0, int(round(z)), int(round(y)), int(round(x))] = 1 # TODO: loses precision since int() rounds down; can interpolate in multiple grid cells when using finer grid
-            # fill in all voxels taken up by the obstacle
-            voxel_grid = fill_3d_gaussian_blob(voxel_grid, (int(round(z)), int(round(y)), int(round(x))), 0,self.grid_size, self.grid_res, self._goal_blob_std)
-        # project the goal as a gaussian blob with mean=1 at the goal onto a channel of the voxel grid
+        # create lidar scan 
+        geomid = np.array([-1], dtype=np.int32)  # Output parameter for geom ID
+        for elevation in range(self.lidar_elevation_bins):
+            elevation_angle = self.lidar_min_elevation + elevation * (self.lidar_max_elevation - self.lidar_min_elevation) / (self.lidar_elevation_bins - 1)
+            for scan in range(self.lidar_scan_bins):
+                scan_angle = np.pi/2 - (self.lidar_min_fov + scan * (self.lidar_max_fov - self.lidar_min_fov) / (self.lidar_scan_bins - 1))
+                scan_vec = spherical_to_cartesian(1, scan_angle, elevation_angle) # unit vector in world frame
+                scan_vec_world_frame = multiply_quaternions(multiply_quaternions(q, np.concatenate([[1],scan_vec])), q_inverse)[1:]
+                # mujoco raycasting
+                distance = mujoco.mj_ray(
+                    self.model, 
+                    self.data, 
+                    p.reshape(3, 1), # world frame
+                    scan_vec_world_frame.reshape(3, 1), # world frame unit vector
+                    geomgroup=None,
+                    flg_static=1,
+                    bodyexclude=self.x2_body_id,  # exclude x2 body and its children (rotors)
+                    geomid=geomid
+                )
+                if distance == -1: # mj_ray returns -1 if no intersection
+                    distance = self.lidar_scan_range
+                lidar_scan[elevation, scan] = min(distance, self.lidar_scan_range)
+
         goal_vec = self._target_location - p
         qg = multiply_quaternions(q_inverse, np.concatenate([[1], goal_vec])) # transform goal from world to body
         goal_vec_body_frame = multiply_quaternions(qg, q)[1:]
         self.goal_vec_body_frame = goal_vec_body_frame
+        # save obstacle vectors for plotting
+        for obstacle in self.obstacle_metadata:
+            pos = obstacle["position"]
+            qv = multiply_quaternions(q_inverse, np.concatenate([[1], pos - p]))
+            obs_vec_body_frame = multiply_quaternions(qv, q)[1:]
+            self.list_obs_vec_body_frame.append(obs_vec_body_frame) # emptied in reset()
 
         # spherical coordinates of goal vector in body frame
         dist_xy = np.linalg.norm(goal_vec_body_frame[:2])
@@ -286,44 +296,25 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         # if very close to goal, set to 0
         if dist < 1e-6:
             # If on top of goal, direction is undefined, set to 0
-            return voxel_grid, np.array([scaled_dist, 0.0, 1.0, 0.0, 1.0])
+            return lidar_scan, np.array([scaled_dist, 0.0, 1.0, 0.0, 1.0])
         sin_az = goal_vec_body_frame[1] / dist_xy
         cos_az = goal_vec_body_frame[0] / dist_xy
         sin_el = goal_vec_body_frame[2] / dist
         cos_el = dist_xy / dist
         goal_vec_spherical = np.array([scaled_dist, sin_az, cos_az, sin_el, cos_el])
 
-        # NOTE: 29 Nov 2025 - disabled goal projection onto grid
-        # transform goal from body to grid frame (positive z is down in grid frame, y is out of the screen, x is right)
-        # goal_vec_grid_frame = np.array([-goal_vec_body_frame[2], -goal_vec_body_frame[1], goal_vec_body_frame[0]]) / self.grid_res
-        # start = grid_center.copy()
-        # goal_position_grid_frame = grid_center + goal_vec_grid_frame
-        # # print("Goal position grid frame: ", goal_position_grid_frame)
-        # # print("Goal vec grid frame: ", goal_vec_grid_frame)
-        # # Run DDA from grid center toward goal
-        # final_voxel = dda_voxel_traversal_to_goal(
-        #     start_grid=grid_center,
-        #     goal_position_grid=goal_position_grid_frame,
-        #     max_steps=self.grid_size * 2,
-        #     grid_size=self.grid_size,
-        # )
-        # # print("Final voxel: ", final_voxel)
-        # zg, yg, xg = final_voxel
-        # voxel_grid[1, int(zg), int(yg), int(xg)] = 1
-        # # fill in Gaussian blob around the goal voxel
-        # voxel_grid = fill_gaussian_blob(voxel_grid, final_voxel, 1,self.grid_size, self.grid_res, self._goal_blob_std)
-        return voxel_grid, goal_vec_spherical
+        return lidar_scan, goal_vec_spherical
 
     def _get_obs(self):
         position = self.data.qpos.flatten()
         velocity = self.data.qvel.flatten()
-        voxel_grid, goal_vec_spherical = self.make_voxel_grid(position)
-        self.voxel_grid = voxel_grid  # Store for visualization
+        lidar_scan, goal_vec_spherical = self.make_lidar_scan(position)
+        self.lidar_scan = lidar_scan  # Store for visualization
         observation = np.concatenate((position, velocity, goal_vec_spherical,
-                            voxel_grid.flatten()))
-        if observation.shape != (self.data.qpos.shape[0] + self.data.qvel.shape[0] + len(goal_vec_spherical) + self.voxel_grid_channels*self.grid_size**3,):
+                            lidar_scan.flatten()))
+        if observation.shape != (self.data.qpos.shape[0] + self.data.qvel.shape[0] + len(goal_vec_spherical) + len(lidar_scan.flatten()),):
             print("Observation shape incorrect: ", observation.shape)
-            print("Expected shape: ", self.data.qpos.shape[0] + self.data.qvel.shape[0] + len(goal_vec_spherical) + self.voxel_grid_channels*self.grid_size**3)
+            print("Expected shape: ", self.data.qpos.shape[0] + self.data.qvel.shape[0] + len(goal_vec_spherical) + len(lidar_scan.flatten()))
             raise ValueError("Observation shape incorrect")
         return observation
 
@@ -404,6 +395,8 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
                 )
             self.generate_obstacle_geoms()
             self.model, self.data = self.mj_spec.recompile(self.model, self.data)
+            # Update body ID after recompiling
+            self.x2_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'x2')
             self.init_qpos = self.data.qpos.ravel().copy()
             self.init_qvel = self.data.qvel.ravel().copy()
             self.mujoco_renderer = MujocoRenderer(
@@ -414,10 +407,11 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
             self.set_start_goal_geoms()
             self.set_env_radius()
 
-        # Save previous episode's voxel grid video if we've collected frames
-        if self._save_voxel_grid_video and len(self._voxel_grid_frames) > 0:
-            save_voxel_grid_video(self._voxel_grid_frames, self._episode_count, self.voxel_grid_video_dir)
-            self._voxel_grid_frames = []
+        # Save previous episode's lidar scan video if we've collected frames
+        if self._save_lidar_scan_video and len(self._lidar_scan_frames) > 0:
+            save_lidar_scan_video(self._lidar_scan_frames, self._episode_count, self.lidar_scan_video_dir)
+            self._lidar_scan_frames = []
+            self.list_obs_vec_body_frame = []
         self._episode_count += 1
         
         mujoco.mj_resetData(self.model, self.data)
@@ -563,12 +557,12 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         Override the parent class render method to add custom logic before rendering.
         This allows intercepting the render() call from RecordVideo wrapper.
         """
-        # Capture voxel grid frame if enabled and it's time to render
-        if self._save_voxel_grid_video and self.voxel_grid is not None:
-            frame = create_voxel_grid_frame(self.voxel_grid, self.grid_size, self.grid_res, self.goal_vec_body_frame, self.list_obs_vec_body_frame, threshold=0.3)
+        # Capture lidar scan
+        if self._save_lidar_scan_video and self.lidar_scan is not None:
+            frame = create_lidar_scan_frame(self.lidar_scan, self.goal_vec_body_frame, self.list_obs_vec_body_frame, self.lidar_scan_range,
+                self.lidar_min_elevation, self.lidar_max_elevation, self.lidar_min_fov, self.lidar_max_fov, self.lidar_elevation_bins, self.lidar_scan_bins)
             if frame is not None:
-                self._voxel_grid_frames.append(frame)
-                self.list_obs_vec_body_frame = []
+                self._lidar_scan_frames.append(frame)
         
         ego_coord = np.round(self.data.qpos[:3], 1)
         target_coord = np.round(self._target_location, 1)
