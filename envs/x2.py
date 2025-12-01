@@ -55,7 +55,7 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         save_voxel_grid_video: bool = False,
         **kwargs,
     ):
-        self.voxel_grid_channels = 1
+        self.voxel_grid_channels = 2
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(13 + 5 + self.voxel_grid_channels*grid_size**3,), dtype=np.float64
         ) # qpos (7), qvel (6), goal_relative spherical (5), obstacle representation (grid_size^3)
@@ -295,23 +295,23 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
 
         # NOTE: 29 Nov 2025 - disabled goal projection onto grid
         # transform goal from body to grid frame (positive z is down in grid frame, y is out of the screen, x is right)
-        # goal_vec_grid_frame = np.array([-goal_vec_body_frame[2], -goal_vec_body_frame[1], goal_vec_body_frame[0]]) / self.grid_res
-        # start = grid_center.copy()
-        # goal_position_grid_frame = grid_center + goal_vec_grid_frame
-        # # print("Goal position grid frame: ", goal_position_grid_frame)
-        # # print("Goal vec grid frame: ", goal_vec_grid_frame)
-        # # Run DDA from grid center toward goal
-        # final_voxel = dda_voxel_traversal_to_goal(
-        #     start_grid=grid_center,
-        #     goal_position_grid=goal_position_grid_frame,
-        #     max_steps=self.grid_size * 2,
-        #     grid_size=self.grid_size,
-        # )
-        # # print("Final voxel: ", final_voxel)
-        # zg, yg, xg = final_voxel
-        # voxel_grid[1, int(zg), int(yg), int(xg)] = 1
-        # # fill in Gaussian blob around the goal voxel
-        # voxel_grid = fill_gaussian_blob(voxel_grid, final_voxel, 1,self.grid_size, self.grid_res, self._goal_blob_std)
+        goal_vec_grid_frame = np.array([-goal_vec_body_frame[2], -goal_vec_body_frame[1], goal_vec_body_frame[0]]) / self.grid_res
+        start = grid_center.copy()
+        goal_position_grid_frame = grid_center + goal_vec_grid_frame
+        # print("Goal position grid frame: ", goal_position_grid_frame)
+        # print("Goal vec grid frame: ", goal_vec_grid_frame)
+        # Run DDA from grid center toward goal
+        final_voxel = dda_voxel_traversal_to_goal(
+            start_grid=grid_center,
+            goal_position_grid=goal_position_grid_frame,
+            max_steps=self.grid_size * 2,
+            grid_size=self.grid_size,
+        )
+        # print("Final voxel: ", final_voxel)
+        zg, yg, xg = final_voxel
+        voxel_grid[1, int(zg), int(yg), int(xg)] = 1
+        # fill in Gaussian blob around the goal voxel
+        voxel_grid = fill_gaussian_blob(voxel_grid, final_voxel, 1,self.grid_size, self.grid_res, self._goal_blob_std)
         return voxel_grid, goal_vec_spherical
 
     def _get_obs(self):
@@ -396,8 +396,9 @@ class QuadNavEnv(MujocoEnv, utils.EzPickle):
         
         if self._use_obstacles and self._regen_obstacles and \
             self.np_random.uniform() < self._obs_regen_eps:
-            print("Regenerating obstacles")
+            # print("Regenerating obstacles and start location. Goal location remains the same.")
             self.mj_spec = mujoco.MjSpec.from_file(self.xml_file)
+            self._start_location = self._config_generator.sample_sphere(self._radius, type="start")
             # generate obstacles at the beginning; possibly regenerate after each episode
             self.obstacle_metadata = self._config_generator.add_obstacles(
                 self._start_location, self._target_location

@@ -88,7 +88,7 @@ class Args:
     """the environment radius"""
     goal_threshold: float = 1.5
     """distance to goal for success"""
-    adaptive_goal_threshold: bool = True
+    adaptive_goal_threshold: bool = False
     """whether to adapt the goal threshold based on the training stage"""
     progress_type: str = "euclidean"
     """the type of progress to use"""
@@ -126,7 +126,7 @@ class Args:
     """the number of closest obstacles to use for observation"""
     goal_reduce_frac: float = 0.99
     """the fraction by which to reduce the goal threshold"""
-    env_removal_start_iter: int = 10000
+    env_removal_start_iter: int = 1000000000
     """the iteration at which to start removing envs for curriculum"""
     grid_size: int = 10
     """size of the voxel grid around the agent"""
@@ -167,7 +167,7 @@ class Agent(nn.Module):
         self.qpos_dim = 7
         self.qvel_dim = 6
         self.goal_vec_spherical_dim = 5
-        self.voxel_grid_channels = 1
+        self.voxel_grid_channels = 2
 
         self.conv3d = nn.Sequential(
             nn.Conv3d(self.voxel_grid_channels, 8, kernel_size=3, stride=1, padding=1),
